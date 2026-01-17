@@ -1,0 +1,38 @@
+name: Go-ALS Streams
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # GitHub kuralı gereği en az 5 dakikada bir çalıştırılabilir.
+  workflow_dispatch: # Manuel tetikleme butonu
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: # Repo'ya yazma izni için gerekli
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests
+
+      - name: Run Script
+        run: python laeerj.py # Dosya ismini güncelledim
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          # Oluşan streams klasörünü ve içindekileri ekle
+          git add streams/*.m3u8
+          # Eğer değişiklik varsa commit et, yoksa hata verme (exit 0)
+          git commit -m "Otomatik Güncelleme: Kanallar yenilendi" || exit 0
+          git push
