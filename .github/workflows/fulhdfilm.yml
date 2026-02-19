@@ -1,0 +1,32 @@
+name: Film Botu Calistir
+
+on:
+  schedule:
+    - cron: '0 * * * *' # Her saat başı çalışır
+  workflow_dispatch: # Manuel çalıştırma butonu ekler
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Depoyu kopyala
+        uses: actions/checkout@v3
+
+      - name: Python Kur
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Kütüphaneleri Yukle
+        run: pip install requests beautifulsoup4
+
+      - name: Botu Calistir
+        run: python fulhdfilm.py
+
+      - name: Degisiklikleri Kaydet
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add film.json
+          git commit -m "Film listesi güncellendi" || exit 0
+          git push
