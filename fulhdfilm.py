@@ -9,23 +9,23 @@ if not os.path.exists('data'):
     os.makedirs('data')
 
 def detay_linki_cek(film_url):
-    """Film sayfasına girer ve iframe (rapid_link) adresini yakalar."""
+    """Film sayfasına girer ve div#plx içindeki iframe linkini yakalar."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Referer': 'https://www.fullhdfilmizlesene.live/'
     }
     try:
-        # Detay sayfasını indir
+        # Film detay sayfasını indir
         res = requests.get(film_url, headers=headers, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            # Senin paylaştığın <div id="plx"> içindeki iframe'i bulalım
+            # 1. Hedef: id'si 'plx' olan div'i bul
             plx_div = soup.find('div', id='plx')
             if plx_div:
                 iframe = plx_div.find('iframe')
                 if iframe:
-                    # data-src varsa onu al (genelde oradadır), yoksa src'yi al
-                    return iframe.get('data-src') or iframe.get('src')
+                    # data-src varsa onu al, yoksa src'yi al
+                    return iframe.get('data-src') or iframe.get('src') or ""
     except:
         return ""
     return ""
@@ -56,21 +56,20 @@ def sayfa_cek(page_num):
             if title and link_tag:
                 f_url = link_tag['href'].rstrip('/')
                 
-                # --- YENİ EKLENEN KISIM ---
-                print(f"İşleniyor: {title.get_text(strip=True)}")
+                # Film detayına gidip iframe linkini alıyoruz
+                print(f"   > Detay Çekiliyor: {title.get_text(strip=True)}")
                 rapid_link = detay_linki_cek(f_url)
-                # -------------------------
 
                 movie_data.append({
                     "title": title.get_text(strip=True),
                     "link": f_url,
-                    "rapid_link": rapid_link, # Artık link buraya gelecek
+                    "rapid_link": rapid_link, # Video linki buraya eklendi
                     "imdb": film.find('span', class_='imdb').get_text(strip=True) if film.find('span', class_='imdb') else "0",
                     "year": film.find('span', class_='film-yil').get_text(strip=True) if film.find('span', class_='film-yil') else "",
                     "image": (film.find('img').get('data-src') or film.find('img').get('src')) if film.find('img') else ""
                 })
-                # Detay sayfasına istek attığımız için ban yememek adına kısa bir mola
-                time.sleep(0.5)
+                # Siteyi yormamak ve banlanmamak için kısa mola
+                time.sleep(1)
 
         if movie_data:
             with open(f'data/yeni-filmler-{page_num}.json', 'w', encoding='utf-8') as f:
@@ -88,7 +87,7 @@ def main():
         if os.path.exists(f'data/yeni-filmler-{p}.json'):
             continue
             
-        print(f"Sayfa Başlatıldı: {p} / {bitis}")
+        print(f"\n--- Sayfa Başlatıldı: {p} / {bitis} ---")
         success = sayfa_cek(p)
         
         if not success:
@@ -96,8 +95,8 @@ def main():
             time.sleep(5)
             continue
             
-        if p % 5 == 0: # Sunucuyu korumak için her 5 sayfada bir 2 sn bekle
-            time.sleep(2)
+        # Her sayfa değişiminde sunucuyu dinlendirelim
+        time.sleep(2)
 
 if __name__ == "__main__":
     main()
