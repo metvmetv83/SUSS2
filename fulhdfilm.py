@@ -4,109 +4,69 @@ import json
 import os
 import time
 
-# Klasör kontrolü
-if not os.path.exists('data'):
-    os.makedirs('data')
+# Ayarlar
+DATA_FOLDER = 'data'
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Referer': 'https://www.fullhdfilmizlesene.live/'
+}
 
 def video_linki_bul(film_url):
-    """Film detay sayfasına girip iframe içindeki video linkini çeker."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Referer': 'https://www.fullhdfilmizlesene.live/'
-    }
+    """Film detay sayfasından iframe linkini çeker."""
     try:
-        # Detay sayfasına istek at
-        response = requests.get(film_url, headers=headers, timeout=10)
+        response = requests.get(film_url, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Iframe etiketini bul (Önce data-src, yoksa src)
+            # Iframe'i bul (data-src öncelikli, sonra src)
             iframe = soup.find('iframe')
             if iframe:
-                video_url = iframe.get('data-src') or iframe.get('src')
-                return video_url
+                return iframe.get('data-src') or iframe.get('src') or ""
     except Exception as e:
-        print(f"      [!] Detay sayfası hatası: {e}")
+        print(f"      [!] Hata: {film_url} çekilemedi: {e}")
     return ""
 
-def sayfa_cek(page_num):
-    # Sayfa 1 için özel link yapısı
-    url = "https://www.fullhdfilmizlesene.live/yeni-filmler/"
-    if page_num > 1:
-        url = f"https://www.fullhdfilmizlesene.live/yeni-filmler/{page_num}"
+def guncelle():
+    # Klasördeki tüm dosyaları listele
+    files = [f for f in os.listdir(DATA_FOLDER) if f.endswith('.json')]
+    # Dosyaları isim sırasına göre diz (yeni-filmler-1.json, 2.json...)
+    files.sort()
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Referer': 'https://www.google.com/'
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            return False
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        films = soup.find_all('li', class_='film')
+    for file_name in files:
+        file_path = os.path.join(DATA_FOLDER, file_name)
+        print(f"\n--- Dosya İnceleniyor: {file_name} ---")
         
-        movie_data = []
-        for film in films:
-            title_tag = film.find('span', class_='film-title')
-            link_tag = film.find('a', class_='tt')
-            
-            if title_tag and link_tag:
-                film_title = title_tag.get_text(strip=True)
-                film_url = link_tag['href'].rstrip('/')
-                
-                print(f"   >>> {film_title} için video linki aranıyor...")
-                
-                # Film detay sayfasındaki video linkini çek
-                video_url = video_linki_bul(film_url)
-                
-                movie_data.append({
-                    "title": film_title,
-                    "link": film_url,
-                    "video_url": video_url,
-                    "imdb": film.find('span', class_='imdb').get_text(strip=True) if film.find('span', class_='imdb') else "0",
-                    "year": film.find('span', class_='film-yil').get_text(strip=True) if film.find('span', class_='film-yil') else "",
-                    "image": (film.find('img').get('data-src') or film.find('img').get('src')) if film.find('img') else ""
-                })
-                
-                # Sunucuyu yormamak için her film arası kısa bekleme
-                time.sleep(0.8)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
 
-        if movie_data:
-            file_path = f'data/yeni-filmler-{page_num}.json'
+        guncelleme_yapildi = False
+        
+        for film in data:
+            # Eğer rapid_link anahtarı yoksa veya boşsa çekim yap
+            if not film.get('rapid_link') or film['rapid_link'] == "":
+                print(f"   > Link çekiliyor: {film['title']}")
+                
+                v_link = video_linki_bul(film['link'])
+                
+                if v_link:
+                    film['rapid_link'] = v_link
+                    guncelleme_yapildi = True
+                    print(f"     [OK] Bulundu: {v_link}")
+                else:
+                    print(f"     [!] Link bulunamadı.")
+                
+                # Engellenmemek için kısa mola
+                time.sleep(1)
+
+        # Eğer dosyada herhangi bir değişiklik yapıldıysa üzerine yaz
+        if guncelleme_yapildi:
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(movie_data, f, ensure_ascii=False, indent=4)
-            return True
-            
-    except Exception as e:
-        print(f"Hata oluştu: {e}")
-        return False
-    return False
-
-def main():
-    baslangic = 1
-    bitis = 1113 
-    
-    print(f"İşlem başlatıldı. {baslangic} ile {bitis} arası sayfalar taranacak.")
-    
-    for p in range(baslangic, bitis + 1):
-        if os.path.exists(f'data/yeni-filmler-{p}.json'):
-            print(f"Sıra {p}: Dosya zaten var, atlanıyor.")
-            continue
-            
-        print(f"\n--- İşleniyor: Sayfa {p} / {bitis} ---")
-        success = sayfa_cek(p)
-        
-        if not success:
-            print(f"Sayfa {p} çekilemedi. 5 saniye mola...")
-            time.sleep(5)
-            continue
-            
-        # Sayfa geçişlerinde bloklanmamak için dinlenme
-        print(f"Sayfa {p} tamamlandı. Dinleniliyor...")
-        time.sleep(2)
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            print(f"--- {file_name} güncellendi ve kaydedildi. ---")
+        else:
+            print(f"--- {file_name} zaten güncel, değişiklik yok. ---")
 
 if __name__ == "__main__":
-    main()
+    if not os.path.exists(DATA_FOLDER):
+        print("Hata: 'data' klasörü bulunamadı!")
+    else:
+        guncelle()
