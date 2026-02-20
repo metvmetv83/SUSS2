@@ -12,61 +12,74 @@ HEADERS = {
 }
 
 def video_linki_bul(film_url):
-    """Film detay sayfasından iframe linkini çeker."""
+    """HTML yapısına göre div#plx içindeki iframe linkini çeker."""
     try:
-        response = requests.get(film_url, headers=HEADERS, timeout=10)
+        response = requests.get(film_url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # Iframe'i bul (data-src öncelikli, sonra src)
-            iframe = soup.find('iframe')
-            if iframe:
-                return iframe.get('data-src') or iframe.get('src') or ""
+            
+            # 1. Yöntem: Direkt id="plx" olan div'in içindeki iframe'i bul
+            plx_div = soup.find('div', id='plx')
+            if plx_div:
+                iframe = plx_div.find('iframe')
+                if iframe:
+                    link = iframe.get('data-src') or iframe.get('src')
+                    if link: return link
+
+            # 2. Yöntem: Eğer plx bulunamazsa tüm sayfadaki iframe'leri tara
+            iframes = soup.find_all('iframe')
+            for f in iframes:
+                src = f.get('data-src') or f.get('src')
+                if src and ('rapidvid' in src or 'video' in src):
+                    return src
+                    
     except Exception as e:
-        print(f"      [!] Hata: {film_url} çekilemedi: {e}")
+        print(f"      [!] Bağlantı hatası: {e}")
     return ""
 
 def guncelle():
-    # Klasördeki tüm dosyaları listele
+    if not os.path.exists(DATA_FOLDER):
+        print(f"Hata: {DATA_FOLDER} klasörü bulunamadı!")
+        return
+
+    # Dosyaları listele
     files = [f for f in os.listdir(DATA_FOLDER) if f.endswith('.json')]
-    # Dosyaları isim sırasına göre diz (yeni-filmler-1.json, 2.json...)
-    files.sort()
+    files.sort() # 1'den başlayarak ilerle
 
     for file_name in files:
         file_path = os.path.join(DATA_FOLDER, file_name)
-        print(f"\n--- Dosya İnceleniyor: {file_name} ---")
         
         with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            try:
+                data = json.load(f)
+            except:
+                continue
 
-        guncelleme_yapildi = False
-        
+        degisiklik_var = False
+        print(f"\n--- Dosya: {file_name} ---")
+
         for film in data:
-            # Eğer rapid_link anahtarı yoksa veya boşsa çekim yap
+            # Eğer rapid_link yoksa veya boşsa çek
             if not film.get('rapid_link') or film['rapid_link'] == "":
-                print(f"   > Link çekiliyor: {film['title']}")
+                print(f"   > Sorgulanıyor: {film['title']}")
                 
                 v_link = video_linki_bul(film['link'])
                 
                 if v_link:
                     film['rapid_link'] = v_link
-                    guncelleme_yapildi = True
-                    print(f"     [OK] Bulundu: {v_link}")
+                    degisiklik_var = True
+                    print(f"     [OK] Link: {v_link}")
                 else:
-                    print(f"     [!] Link bulunamadı.")
+                    print(f"     [!] Link hala bulunamadı.")
                 
-                # Engellenmemek için kısa mola
-                time.sleep(1)
+                # Siteyi yormamak için bekleme (Önemli!)
+                time.sleep(1.2)
 
-        # Eğer dosyada herhangi bir değişiklik yapıldıysa üzerine yaz
-        if guncelleme_yapildi:
+        # Sadece değişiklik varsa dosyayı kaydet
+        if degisiklik_var:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
-            print(f"--- {file_name} güncellendi ve kaydedildi. ---")
-        else:
-            print(f"--- {file_name} zaten güncel, değişiklik yok. ---")
+            print(f"--- {file_name} güncellendi. ---")
 
 if __name__ == "__main__":
-    if not os.path.exists(DATA_FOLDER):
-        print("Hata: 'data' klasörü bulunamadı!")
-    else:
-        guncelle()
+    guncelle()
