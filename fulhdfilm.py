@@ -5,102 +5,94 @@ import os
 import time
 import re
 
-# Klasör kontrolü
 if not os.path.exists('data'):
     os.makedirs('data')
 
-def rapid_bul(film_url):
-    """Film sayfasının içine girer ve iframe/rapidvid linkini bulur."""
+def detay_link_sokucu(film_url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Referer': 'https://www.fullhdfilmizlesene.live/'
     }
     try:
-        # Film detay sayfasını çek
         res = requests.get(film_url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            # HTML içinde rapidvid linkini ara
-            match = re.search(r'https?://rapidvid\.net/vod/[a-zA-Z0-9]+', res.text)
-            if match:
-                return match.group(0)
+        if res.status_code != 200: return ""
+        
+        html = res.text
+        
+        # 1. YÖNTEM: HTML içinde direkt linki ara (Regex)
+        match = re.search(r'https?://rapidvid\.net/vod/[a-zA-Z0-9]+', html)
+        if match: return match.group(0)
+        
+        # 2. YÖNTEM: VidID yakalayıp API'den asıl linki iste
+        # Site bazen linki: "vidid = '12345'" şeklinde saklar.
+        vid_match = re.search(r'vidid\s*=\s*[\'"]([^\'"]+)[\'"]', html)
+        if vid_match:
+            vid_id = vid_match.group(1)
+            api_url = f"https://www.fullhdfilmizlesene.live/player/api.php?id={vid_id}&type=t&name=atom&get=video&format=json"
+            api_res = requests.get(api_url, headers=headers, timeout=5)
+            if api_res.status_code == 200:
+                api_json = api_res.json()
+                # API içindeki HTML'den iframe src'sini çek
+                if 'html' in api_json:
+                    src_match = re.search(r'src=["\']([^"\']+)["\']', api_json['html'])
+                    if src_match: return src_match.group(1)
+        
+        # 3. YÖNTEM: BeautifulSoup ile iframe tara
+        soup = BeautifulSoup(html, 'html.parser')
+        iframe = soup.find('iframe', {'data-src': True}) or soup.find('iframe', {'src': True})
+        if iframe:
+            src = iframe.get('data-src') or iframe.get('src')
+            if 'rapidvid' in src: return src
             
-            # Eğer yukarıdaki bulamazsa iframe tag'ini tara
-            soup = BeautifulSoup(res.text, 'html.parser')
-            iframe = soup.find('iframe', src=re.compile(r'rapidvid\.net'))
-            if iframe:
-                return iframe['src']
-    except:
-        pass
+    except Exception as e:
+        print(f"Detay çekme hatası: {e}")
     return ""
 
 def sayfa_cek(page_num):
-    url = "https://www.fullhdfilmizlesene.live/yeni-filmler/"
-    if page_num > 1:
-        url = f"https://www.fullhdfilmizlesene.live/yeni-filmler/{page_num}"
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Referer': 'https://www.google.com/'
-    }
+    url = f"https://www.fullhdfilmizlesene.live/yeni-filmler/{page_num}" if page_num > 1 else "https://www.fullhdfilmizlesene.live/yeni-filmler/"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'}
 
     try:
         response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"Hata: Sayfa {page_num} için status {response.status_code}")
-            return False
-
         soup = BeautifulSoup(response.text, 'html.parser')
         films = soup.find_all('li', class_='film')
         
-        movie_data = []
+        results = []
         for film in films:
-            title = film.find('span', class_='film-title')
-            link = film.find('a', class_='tt')
+            t_node = film.find('span', class_='film-title')
+            l_node = film.find('a', class_='tt')
             
-            if title and link:
-                film_url = link['href'].rstrip('/')
-                print(f"--- Detay taranıyor: {title.get_text(strip=True)}")
+            if t_node and l_node:
+                f_url = l_node['href'].rstrip('/')
+                f_title = t_node.get_text(strip=True)
+                print(f"-> {f_title} işleniyor...")
                 
-                # ÖNEMLİ: Her film için içeri girip rapid linkini al
-                rapid_link = rapid_bul(film_url)
+                # İşte o eksik dediğimiz 'derine inme' kısmı
+                r_link = detay_link_sokucu(f_url)
                 
-                movie_data.append({
-                    "title": title.get_text(strip=True),
-                    "link": film_url,
-                    "rapid_link": rapid_link, # Yeni eklenen alan
+                results.append({
+                    "title": f_title,
+                    "link": f_url,
+                    "rapid_link": r_link,
                     "imdb": film.find('span', class_='imdb').get_text(strip=True) if film.find('span', class_='imdb') else "0",
                     "year": film.find('span', class_='film-yil').get_text(strip=True) if film.find('span', class_='film-yil') else "",
                     "image": (film.find('img').get('data-src') or film.find('img').get('src')) if film.find('img') else ""
                 })
-                # Siteyi yormamak için kısa mola
-                time.sleep(1)
+                time.sleep(1) # Siteyi kızdırmayalım
 
-        if movie_data:
+        if results:
             with open(f'data/yeni-filmler-{page_num}.json', 'w', encoding='utf-8') as f:
-                json.dump(movie_data, f, ensure_ascii=False, indent=4)
+                json.dump(results, f, ensure_ascii=False, indent=4)
             return True
     except Exception as e:
-        print(f"Hata: {e}")
-        return False
+        print(f"Ana sayfa hatası: {e}")
     return False
 
 def main():
-    baslangic = 1
-    bitis = 1113 # Çok sayfa olduğu için parça parça çekmeni öneririm (örn: 1-10)
-    
-    for p in range(baslangic, bitis + 1):
-        if os.path.exists(f'data/yeni-filmler-{p}.json'):
-            continue
-            
-        print(f"\n>>> İşleniyor: Sayfa {p} / {bitis}")
-        success = sayfa_cek(p)
-        
-        if not success:
-            print(f"Sayfa {p} çekilemedi. Bekleniyor...")
-            time.sleep(10)
-            continue
-            
-        time.sleep(2)
+    # İlk 5 sayfayı test et
+    for p in range(1, 6):
+        print(f"\n*** SAYFA {p} ***")
+        sayfa_cek(p)
 
 if __name__ == "__main__":
     main()
