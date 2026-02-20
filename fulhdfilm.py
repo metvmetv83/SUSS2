@@ -1,83 +1,103 @@
+import requests
+from bs4 import BeautifulSoup
 import json
 import os
 import time
-from playwright.sync_api import sync_playwright
 
-# Ayarlar
-DATA_FOLDER = 'data'
+# Klasör kontrolü
+if not os.path.exists('data'):
+    os.makedirs('data')
 
-def video_linki_cek_pro(browser_context, film_url):
-    """Gerçek bir tarayıcı kullanarak iframe linkini yakalar."""
-    page = browser_context.new_page()
-    # Bot olduğumuzu gizlemek için User-Agent
-    page.set_extra_http_headers({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-    })
-    
+def detay_linki_cek(film_url):
+    """Film sayfasına girer ve iframe (rapid_link) adresini yakalar."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Referer': 'https://www.fullhdfilmizlesene.live/'
+    }
     try:
-        # Sayfaya git ve yüklenmesini bekle
-        page.goto(film_url, wait_until="domcontentloaded", timeout=30000)
-        
-        # iframe'in gelmesi için kısa bir süre bekle (JavaScript render süresi)
-        page.wait_for_selector("#plx iframe", timeout=5000)
-        
-        # Elementi bul ve linki al
-        iframe = page.query_selector("#plx iframe")
-        if iframe:
-            # Önce data-src'ye bak, yoksa src'yi al
-            v_link = iframe.get_attribute("data-src") or iframe.get_attribute("src")
-            page.close()
-            return v_link
-    except Exception as e:
-        print(f"      [!] Hata oluştu: {film_url} (Zaman aşımı veya eleman bulunamadı)")
-    
-    page.close()
+        # Detay sayfasını indir
+        res = requests.get(film_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # Senin paylaştığın <div id="plx"> içindeki iframe'i bulalım
+            plx_div = soup.find('div', id='plx')
+            if plx_div:
+                iframe = plx_div.find('iframe')
+                if iframe:
+                    # data-src varsa onu al (genelde oradadır), yoksa src'yi al
+                    return iframe.get('data-src') or iframe.get('src')
+    except:
+        return ""
     return ""
 
+def sayfa_cek(page_num):
+    url = "https://www.fullhdfilmizlesene.live/yeni-filmler/"
+    if page_num > 1:
+        url = f"https://www.fullhdfilmizlesene.live/yeni-filmler/{page_num}"
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Referer': 'https://www.google.com/'
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return False
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        films = soup.find_all('li', class_='film')
+        
+        movie_data = []
+        for film in films:
+            title = film.find('span', class_='film-title')
+            link_tag = film.find('a', class_='tt')
+            
+            if title and link_tag:
+                f_url = link_tag['href'].rstrip('/')
+                
+                # --- YENİ EKLENEN KISIM ---
+                print(f"İşleniyor: {title.get_text(strip=True)}")
+                rapid_link = detay_linki_cek(f_url)
+                # -------------------------
+
+                movie_data.append({
+                    "title": title.get_text(strip=True),
+                    "link": f_url,
+                    "rapid_link": rapid_link, # Artık link buraya gelecek
+                    "imdb": film.find('span', class_='imdb').get_text(strip=True) if film.find('span', class_='imdb') else "0",
+                    "year": film.find('span', class_='film-yil').get_text(strip=True) if film.find('span', class_='film-yil') else "",
+                    "image": (film.find('img').get('data-src') or film.find('img').get('src')) if film.find('img') else ""
+                })
+                # Detay sayfasına istek attığımız için ban yememek adına kısa bir mola
+                time.sleep(0.5)
+
+        if movie_data:
+            with open(f'data/yeni-filmler-{page_num}.json', 'w', encoding='utf-8') as f:
+                json.dump(movie_data, f, ensure_ascii=False, indent=4)
+            return True
+    except:
+        return False
+    return False
+
 def main():
-    if not os.path.exists(DATA_FOLDER):
-        print(f"Hata: {DATA_FOLDER} klasörü bulunamadı!")
-        return
-
-    with sync_playwright() as p:
-        # Tarayıcıyı başlat (headless=True yaparak arka planda çalıştırıyoruz)
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-
-        files = [f for f in os.listdir(DATA_FOLDER) if f.endswith('.json')]
-        files.sort(reverse=True) # En son dosyalardan geriye doğru git
-
-        for file_name in files:
-            file_path = os.path.join(DATA_FOLDER, file_name)
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            guncellendi = False
-            print(f"\n--- Dosya İşleniyor: {file_name} ---")
-
-            for film in data:
-                # Sadece linki olmayanları güncelle
-                if not film.get('rapid_link') or film['rapid_link'] == "":
-                    print(f"   > Link Çekiliyor: {film['title']}")
-                    
-                    v_link = video_linki_cek_pro(context, film['link'])
-                    
-                    if v_link:
-                        film['rapid_link'] = v_link
-                        guncellendi = True
-                        print(f"     [OK] Link: {v_link}")
-                    else:
-                        print(f"     [X] Link bulunamadı.")
-                    
-                    # Siteyi korumak ve banlanmamak için kısa mola
-                    time.sleep(1)
-
-            if guncellendi:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=4)
-                print(f"--- {file_name} kaydedildi! ---")
-
-        browser.close()
+    baslangic = 1
+    bitis = 1113 
+    
+    for p in range(baslangic, bitis + 1):
+        if os.path.exists(f'data/yeni-filmler-{p}.json'):
+            continue
+            
+        print(f"Sayfa Başlatıldı: {p} / {bitis}")
+        success = sayfa_cek(p)
+        
+        if not success:
+            print(f"Sayfa {p} çekilemedi. Mola veriliyor...")
+            time.sleep(5)
+            continue
+            
+        if p % 5 == 0: # Sunucuyu korumak için her 5 sayfada bir 2 sn bekle
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()
