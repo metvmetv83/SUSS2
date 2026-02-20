@@ -2,8 +2,11 @@ name: Film Botu Calistir
 
 on:
   schedule:
-    - cron: '0 * * * *' # Her saat başı çalışır
-  workflow_dispatch: # Manuel çalıştırma butonu ekler
+    - cron: '0 * * * *' # Her saat başı otomatik çalışır
+  workflow_dispatch: # Senin manuel olarak başlatmanı sağlar
+
+permissions:
+  contents: write # GitHub'ın dosyaları depona kaydetmesi için şarttır
 
 jobs:
   build:
@@ -25,8 +28,15 @@ jobs:
 
       - name: Degisiklikleri Kaydet
         run: |
-          git config --global user.name "GitHub Action"
-          git config --global user.email "action@github.com"
-          git add film.json
-          git commit -m "Film listesi güncellendi" || exit 0
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Yeni dosyaları ve klasörü Git takibine al
+          git add data/
+          git add data/*.json
+          
+          # Eğer değişiklik varsa commit yap, yoksa hata vermeden geç
+          git commit -m "Film verileri güncellendi (1113 Sayfa)" || echo "Değişiklik yok."
+          
+          # Verileri depoya gönder
           git push
