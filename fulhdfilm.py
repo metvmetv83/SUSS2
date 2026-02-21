@@ -102,7 +102,7 @@ def sayfa_cek(page_num):
 
 def main():
     baslangic = 1
-    bitis = 1113 # İhtiyaca göre güncellenebilir
+    bitis = 11 # İhtiyaca göre güncellenebilir
     
     print("=== Bot Başlatıldı ===")
     for p in range(baslangic, bitis + 1):
