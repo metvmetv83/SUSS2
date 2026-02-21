@@ -4,170 +4,137 @@ import json
 import os
 import time
 import re
+import base64
 
 if not os.path.exists('data'):
     os.makedirs('data')
 
-# ============================================================
-# STRATEJI A: Selenium (JS render eder, en güvenilir)
-# pip install selenium webdriver-manager
-# ============================================================
-def selenium_kur():
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        from webdriver_manager.chrome import ChromeDriverManager
-
-        options = Options()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36')
-
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=options
-        )
-        return driver
-    except Exception as e:
-        print(f"[Selenium HATA] {e}")
-        return None
-
-def selenium_rapid_cek(driver, film_url):
-    try:
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-
-        driver.get(film_url)
-
-        # #plx div içindeki iframe yüklenene kadar bekle (max 10sn)
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "#plx iframe"))
-            )
-        except:
-            pass
-
-        time.sleep(2)  # JS'nin iframe src'yi set etmesi için ekstra bekle
-
-        page_source = driver.page_source
-
-        # Önce iframe src'yi doğrudan bul
-        soup = BeautifulSoup(page_source, 'html.parser')
-        plx = soup.find('div', id='plx')
-        if plx:
-            iframe = plx.find('iframe')
-            if iframe:
-                src = iframe.get('src') or iframe.get('data-src') or ''
-                if src and 'rapidvid' in src:
-                    return "https:" + src if src.startswith("//") else src
-
-        # Regex ile tüm sayfada ara
-        match = re.search(
-            r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)',
-            page_source
-        )
-        if match:
-            return match.group(0)
-
-        # Selenium ile iframe'i direkt yakala
-        try:
-            iframes = driver.find_elements(By.TAG_NAME, 'iframe')
-            for iframe_el in iframes:
-                src = iframe_el.get_attribute('src') or iframe_el.get_attribute('data-src') or ''
-                if 'rapidvid' in src:
-                    return "https:" + src if src.startswith("//") else src
-        except:
-            pass
-
-    except Exception as e:
-        print(f"    [Selenium HATA] {film_url} -> {e}")
-    return ""
-
-# ============================================================
-# STRATEJI B: Ajax/API isteği tahmini (Selenium yoksa fallback)
-# ============================================================
-def ajax_rapid_cek(film_url):
+def decode_data_id(data_id: str) -> str:
     """
-    Bazı siteler video ID'sini ayrı bir endpoint'ten çeker.
-    Film URL'sinden slug çıkarıp tahmin edilen API'lere istek atar.
+    Site data-id değerini özel bir XOR/base64 karışımıyla şifreliyor.
+    Önce base64 decode, sonra içinde rapidvid linki arayacağız.
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': film_url,
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-    }
-
-    # Film slug'ını URL'den çıkar
-    slug = film_url.rstrip('/').split('/')[-1]
-    base = "https://www.fullhdfilmizlesene.live"
-
-    # Tahmin edilen Ajax endpoint'leri
-    ajax_urls = [
-        f"{base}/wp-admin/admin-ajax.php",
-        f"{base}/api/video/{slug}",
-        f"{base}/embed/{slug}",
-        f"{base}/?p={slug}&action=get_video",
-    ]
-
-    # admin-ajax.php için POST dene
     try:
-        with requests.Session() as s:
-            s.get(film_url, headers={'User-Agent': headers['User-Agent']}, timeout=10)
-
-            # action tahminleri
-            for action in ['get_player', 'get_video', 'load_player', 'get_embed']:
-                try:
-                    r = s.post(
-                        f"{base}/wp-admin/admin-ajax.php",
-                        data={'action': action, 'slug': slug},
-                        headers=headers,
-                        timeout=8
-                    )
-                    if r.status_code == 200 and 'rapidvid' in r.text:
-                        match = re.search(
-                            r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)',
-                            r.text
-                        )
-                        if match:
-                            print(f"      [AJAX] {action} -> {match.group(0)}")
-                            return match.group(0)
-                except:
-                    continue
+        # Standart base64 decode
+        decoded = base64.b64decode(data_id + '==').decode('utf-8', errors='ignore')
+        return decoded
+    except:
+        pass
+    try:
+        # URL-safe base64
+        decoded = base64.urlsafe_b64decode(data_id + '==').decode('utf-8', errors='ignore')
+        return decoded
     except:
         pass
     return ""
 
-# ============================================================
-# ANA FONKSİYON
-# ============================================================
-USE_SELENIUM = True  # Selenium yoksa False yap
+def extract_from_data_ids(soup) -> str:
+    """Tüm ajax-data div'lerinin data-id'lerini decode edip rapidvid linki arar."""
+    for div in soup.find_all('div', class_='ajax-data'):
+        data_id = div.get('data-id', '')
+        if not data_id:
+            continue
+        
+        decoded = decode_data_id(data_id)
+        
+        # Decode içinde rapidvid ara
+        match = re.search(
+            r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)',
+            decoded
+        )
+        if match:
+            print(f"      [data-id decoded] {match.group(0)}")
+            return match.group(0)
+        
+        # v1x formatı ara
+        v1x = re.search(r'(v1x[a-zA-Z0-9]+)', decoded)
+        if v1x:
+            url = f"https://rapidvid.net/vod/{v1x.group(1)}"
+            print(f"      [data-id v1x] {url}")
+            return url
 
-driver = None
-if USE_SELENIUM:
-    print("Selenium başlatılıyor...")
-    driver = selenium_kur()
-    if driver:
-        print("✓ Selenium hazır (headless Chrome)")
-    else:
-        print("✗ Selenium başlatılamadı, Ajax moduna geçiliyor")
-        USE_SELENIUM = False
+        # DEBUG: decode sonucunu yazdır
+        if len(decoded) > 5:
+            print(f"      [data-id raw] {decoded[:80]}")
+
+    return ""
 
 def detay_linki_cek(film_url):
-    if USE_SELENIUM and driver:
-        link = selenium_rapid_cek(driver, film_url)
-        if link:
-            return link
-    # Selenium bulamazsa Ajax dene
-    return ajax_rapid_cek(film_url)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Referer': 'https://www.fullhdfilmizlesene.live/',
+        'Accept-Language': 'tr-TR,tr;q=0.8,en-US;q=0.5,en;q=0.3',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+    }
+    
+    try:
+        with requests.Session() as s:
+            s.get('https://www.fullhdfilmizlesene.live/', headers=headers, timeout=10)
+            time.sleep(0.3)
+
+            res = s.get(film_url, headers=headers, timeout=12)
+            if res.status_code != 200:
+                print(f"    [HTTP {res.status_code}] {film_url}")
+                return ""
+            
+            content = res.text
+            soup = BeautifulSoup(content, 'html.parser')
+
+            # STRATEJİ 1: #plx iframe data-src (JS doldurmadan önce boş olabilir)
+            plx_div = soup.find('div', id='plx')
+            if plx_div:
+                iframe = plx_div.find('iframe')
+                if iframe:
+                    src = iframe.get('data-src') or iframe.get('src') or ''
+                    if src and 'rapidvid' in src:
+                        print(f"      [S1-plx] {src}")
+                        return "https:" + src if src.startswith("//") else src
+
+            # STRATEJİ 2: ajax-data data-id decode
+            link = extract_from_data_ids(soup)
+            if link:
+                return link
+
+            # STRATEJİ 3: Regex ile tüm sayfada rapidvid ara
+            data_src_match = re.search(
+                r'data-src=["\']([^"\']*rapidvid\.net/(?:vod|v|embed)/[a-zA-Z0-9]+[^"\']*)["\']',
+                content
+            )
+            if data_src_match:
+                src = data_src_match.group(1)
+                print(f"      [S3-regex] {src}")
+                return "https:" + src if src.startswith("//") else src
+
+            # STRATEJİ 4: Tüm rapidvid linkleri
+            all_rapid = re.findall(
+                r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)',
+                content
+            )
+            if all_rapid:
+                for vid_id in all_rapid:
+                    if vid_id.startswith('v'):
+                        url = f"https://rapidvid.net/vod/{vid_id}"
+                        print(f"      [S4-vx] {url}")
+                        return url
+                url = f"https://rapidvid.net/vod/{all_rapid[0]}"
+                print(f"      [S4-fallback] {url}")
+                return url
+
+            # STRATEJİ 5: Script tagları içinde
+            for script in soup.find_all('script'):
+                sc = script.string or ''
+                m = re.search(r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)', sc)
+                if m:
+                    print(f"      [S5-script] {m.group(0)}")
+                    return m.group(0)
+
+            print(f"      [DEBUG] Hiçbir strateji çalışmadı — data-id sayısı: {len(soup.find_all('div', class_='ajax-data'))}")
+
+    except Exception as e:
+        print(f"    [HATA] {film_url} -> {e}")
+    return ""
 
 def sayfa_cek(page_num):
     base_url = "https://www.fullhdfilmizlesene.live/yeni-filmler/"
@@ -210,8 +177,7 @@ def sayfa_cek(page_num):
                     "year": film.find('span', class_='film-yil').text if film.find('span', class_='film-yil') else "",
                     "image": film.find('img').get('data-src') or film.find('img').get('src')
                 })
-
-                time.sleep(1.5 if USE_SELENIUM else 1)
+                time.sleep(1)
 
         if movie_data:
             with open(f'data/yeni-filmler-{page_num}.json', 'w', encoding='utf-8') as f:
@@ -226,23 +192,18 @@ def main():
     consecutive_404 = 0
     max_consecutive_404 = 3
 
-    try:
-        for p in range(1, 9999):
-            print(f"\n--- Sayfa {p} ---")
-            result = sayfa_cek(p)
+    for p in range(1, 9999):
+        print(f"\n--- Sayfa {p} ---")
+        result = sayfa_cek(p)
 
-            if result == "404":
-                consecutive_404 += 1
-                print(f"  [404: {consecutive_404}/{max_consecutive_404}]")
-                if consecutive_404 >= max_consecutive_404:
-                    print(f"\n✓ Bitti. Son geçerli sayfa: {p - max_consecutive_404}")
-                    break
-            else:
-                consecutive_404 = 0
-    finally:
-        if driver:
-            driver.quit()
-            print("Selenium kapatıldı.")
+        if result == "404":
+            consecutive_404 += 1
+            print(f"  [404: {consecutive_404}/{max_consecutive_404}]")
+            if consecutive_404 >= max_consecutive_404:
+                print(f"\n✓ Bitti. Son geçerli sayfa: {p - max_consecutive_404}")
+                break
+        else:
+            consecutive_404 = 0
 
 if __name__ == "__main__":
     main()
