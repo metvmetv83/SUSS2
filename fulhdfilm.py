@@ -5,95 +5,103 @@ import os
 import time
 import re
 
-BASE_URL = "https://www.fullhdfilmizlesene.live"
-LIST_URL = BASE_URL + "/yeni-filmler/"
+if not os.path.exists('data'):
+    os.makedirs('data')
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8"
-}
+def detay_linki_cek(film_url):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': film_url
+    }
 
-if not os.path.exists("data"):
-    os.makedirs("data")
-
-
-def get_html(url):
     try:
-        res = requests.get(url, headers=HEADERS, timeout=15)
-        if res.status_code == 200:
-            return res.text
+        with requests.Session() as s:
+            res = s.get(film_url, headers=headers, timeout=15)
+            if res.status_code != 200:
+                return ""
+
+            soup = BeautifulSoup(res.text, "html.parser")
+
+            # 1️⃣ iframe data-src kontrolü
+            iframe = soup.find("iframe", attrs={"data-src": True})
+            if iframe:
+                link = iframe.get("data-src")
+                if "rapidvid.net" in link:
+                    return link.strip()
+
+            # 2️⃣ iframe src kontrolü
+            iframe = soup.find("iframe", src=True)
+            if iframe:
+                link = iframe.get("src")
+                if "rapidvid.net" in link:
+                    return link.strip()
+
+            # 3️⃣ regex fallback
+            match = re.search(r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/[a-zA-Z0-9]+', res.text)
+            if match:
+                return match.group(0)
+
     except Exception as e:
         print("Hata:", e)
+
     return ""
 
 
-def extract_rapidvid(html):
-    """
-    Sadece HTML içinde açık şekilde varsa Rapidvid linkini döndürür.
-    Koruma bypass etmez.
-    """
-    match = re.search(
-        r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/[a-zA-Z0-9]+',
-        html
-    )
-    if match:
-        return match.group(0).replace("\\", "")
-    return ""
+def sayfa_cek(page_num):
+    base_url = "https://www.fullhdfilmizlesene.live/yeni-filmler/"
+    url = base_url if page_num == 1 else f"{base_url}page/{page_num}/"
 
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'
+    }
 
-def scrape_page(page_number):
-    url = LIST_URL if page_number == 1 else f"{LIST_URL}page/{page_number}/"
-    print(f"\n--- Sayfa {page_number} ---")
-    
-    html = get_html(url)
-    if not html:
-        print("Sayfa alınamadı.")
-        return False
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return False
 
-    soup = BeautifulSoup(html, "html.parser")
-    films = soup.find_all("li", class_="film")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        films = soup.find_all('li', class_='film')
 
-    if not films:
-        print("Film bulunamadı.")
-        return False
+        movie_data = []
 
-    results = []
+        for film in films:
+            title = film.find('span', class_='film-title')
+            link_tag = film.find('a', class_='tt')
 
-    for film in films:
-        title_tag = film.find("span", class_="film-title")
-        link_tag = film.find("a", class_="tt")
+            if title and link_tag:
+                f_url = link_tag['href'].rstrip('/')
+                print(f"Çekiliyor: {title.text}")
 
-        if not title_tag or not link_tag:
-            continue
+                rapid_link = detay_linki_cek(f_url)
 
-        film_url = link_tag["href"].rstrip("/")
-        print("  >", title_tag.text.strip())
+                movie_data.append({
+                    "title": title.text.strip(),
+                    "detail_url": f_url,
+                    "rapidvid_link": rapid_link,
+                    "imdb": film.find('span', class_='imdb').text if film.find('span', class_='imdb') else "0",
+                    "year": film.find('span', class_='film-yil').text if film.find('span', class_='film-yil') else "",
+                    "image": film.find('img').get('data-src') or film.find('img').get('src')
+                })
 
-        detail_html = get_html(film_url)
-        rapid_link = extract_rapidvid(detail_html) if detail_html else ""
+                time.sleep(1)
 
-        results.append({
-            "title": title_tag.text.strip(),
-            "detail_url": film_url,
-            "rapidvid_link": rapid_link,
-            "imdb": film.find("span", class_="imdb").text.strip() if film.find("span", class_="imdb") else "",
-            "year": film.find("span", class_="film-yil").text.strip() if film.find("span", class_="film-yil") else "",
-            "image": film.find("img").get("data-src") or film.find("img").get("src")
-        })
+        if movie_data:
+            with open(f'data/yeni-filmler-{page_num}.json', 'w', encoding='utf-8') as f:
+                json.dump(movie_data, f, ensure_ascii=False, indent=4)
 
-        time.sleep(1)
+            return True
 
-    with open(f"data/page-{page_number}.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print("Sayfa hata:", e)
 
-    return True
+    return False
 
 
 def main():
-    for page in range(1, 5):  # test için 1-4 arası
-        success = scrape_page(page)
-        if not success:
-            break
+    for p in range(1, 3):  # test için 2 sayfa
+        print(f"\n--- Sayfa {p} ---")
+        sayfa_cek(p)
 
 
 if __name__ == "__main__":
