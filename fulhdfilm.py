@@ -5,44 +5,50 @@ import os
 import time
 import re
 
-# Klasör kontrolü
+# 1. Klasör Hazırlığı
 if not os.path.exists('data'):
     os.makedirs('data')
 
-# Cloudflare engellerini aşmak için scraper oluştur
-scraper = cloudscraper.create_scraper()
+# Cloudflare korumasını geçebilen gelişmiş tarayıcı nesnesi
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
 
 def detay_linki_cek(film_url):
     """
-    Cloudflare korumasını aşarak rapidvid linkini yakalar.
+    Rapidvid ve gizli player linklerini yakalamak için hibrit tarama yapar.
     """
     try:
-        # Siteyi gerçek bir kullanıcı gibi ziyaret et
+        # Gerçek kullanıcı gibi sayfaya git
         res = scraper.get(film_url, timeout=15)
         if res.status_code == 200:
             content = res.text
             
-            # --- STRATEJİ 1: Regex ile rapidvid.net Taraması ---
-            # En garantici yöntem: Link veya ID metin içinde geçiyor mu?
-            rapid_match = re.search(r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)', content)
+            # --- STRATEJİ 1: Metin İçinde RapidVid Araması ---
+            # Sayfa kaynağında (scriptlerin içinde olsa bile) linki yakalar
+            rapid_match = re.search(r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/[a-zA-Z0-9]+', content)
             if rapid_match:
                 return rapid_match.group(0).replace('\\', '')
 
-            # --- STRATEJİ 2: BeautifulSoup ile Iframe Arama ---
+            # --- STRATEJİ 2: BeautifulSoup ile Iframe Taraması ---
             soup = BeautifulSoup(content, 'html.parser')
             for iframe in soup.find_all('iframe'):
                 src = iframe.get('data-src') or iframe.get('src') or ""
-                if "rapidvid" in src:
+                if "rapid" in src or "vid" in src:
                     return "https:" + src if src.startswith("//") else src
 
-            # --- STRATEJİ 3: JSON/Variable Taraması ---
-            # Site bazen linki bir değişkene atar: videoSource = "..."
-            json_match = re.search(r'["\']?link["\']?\s*[:=]\s*["\'](https?://rapidvid\.net/[^"\']+)["\']', content)
-            if json_match:
-                return json_match.group(1).replace('\\', '')
+            # --- STRATEJİ 3: Gizli ID Değişkenleri ---
+            # var video_id = "v1xaadef5ab" gibi tanımları bulup linke çevirir
+            id_match = re.search(r'["\']?(?:vid|video_id|id)["\']?\s*[:=]\s*["\']([a-zA-Z0-9]{5,})["\']', content)
+            if id_match:
+                return f"https://rapidvid.net/vod/{id_match.group(1)}"
 
     except Exception as e:
-        print(f"      ! Detay çekme hatası: {e}")
+        print(f"      ! Link çekilemedi: {e}")
     return ""
 
 def sayfa_cek(page_num):
@@ -52,7 +58,7 @@ def sayfa_cek(page_num):
     try:
         response = scraper.get(url, timeout=20)
         if response.status_code != 200:
-            print(f"Hata: Sayfa {page_num} (Kod: {response.status_code})")
+            print(f"Hata: Sayfa {page_num} alınamadı (Kod: {response.status_code})")
             return False
 
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -67,7 +73,7 @@ def sayfa_cek(page_num):
                 f_url = link_tag['href'].rstrip('/')
                 t_text = title_tag.get_text(strip=True)
                 
-                print(f"    > Analiz ediliyor: {t_text}")
+                print(f"    > Kaynak Aranıyor: {t_text}")
                 rapid_link = detay_linki_cek(f_url)
 
                 movie_data.append({
@@ -78,7 +84,8 @@ def sayfa_cek(page_num):
                     "year": film.find('span', class_='film-yil').get_text(strip=True) if film.find('span', class_='film-yil') else "",
                     "image": (film.find('img').get('data-src') or film.find('img').get('src')) if film.find('img') else ""
                 })
-                time.sleep(1.5) # Cloudflare banlanmamak için hızı düşürdük
+                # Ban koruması için makul mola
+                time.sleep(1.2)
 
         if movie_data:
             file_name = f'data/yeni-filmler-{page_num}.json'
@@ -87,17 +94,14 @@ def sayfa_cek(page_num):
             print(f"--- Sayfa {page_num} Tamamlandı ---")
             return True
     except Exception as e:
-        print(f"Hata oluştu: {e}")
+        print(f"Sayfa {page_num} hatası: {e}")
         return False
 
 def main():
-    # 1113 sayfaya kadar tara
+    # Sayfaları tara
     for p in range(1, 1114):
-        # NOT: Mevcut dosyayı atlamıyoruz (Çünkü linkleri bulamadık, tekrar denememiz lazım)
-        # Eğer hızlanmak istersen bu if bloğunu açabilirsin
-        # if os.path.exists(f'data/yeni-filmler-{p}.json'): continue
-
-        print(f"\n--- İşleniyor: Sayfa {p} ---")
+        # NOT: Eğer rapid_linkleri doldurmak istiyorsan 'exists' kontrolünü devre dışı bırakıyoruz.
+        print(f"\n--- Sayfa {p} İşleniyor ---")
         sayfa_cek(p)
 
 if __name__ == "__main__":
