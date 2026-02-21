@@ -20,40 +20,57 @@ def detay_linki_cek(film_url):
     try:
         with requests.Session() as s:
             res = s.get(film_url, headers=headers, timeout=12)
-            if res.status_code == 200:
-                content = res.text
-                
-                # --- STRATEJİ 1: data-src içinde rapidvid linki (ana çözüm) ---
-                data_src_match = re.search(
-                    r'data-src=["\']([^"\']*rapidvid\.net[^"\']*)["\']',
-                    content
-                )
-                if data_src_match:
-                    src = data_src_match.group(1)
-                    return "https:" + src if src.startswith("//") else src
+            if res.status_code != 200:
+                print(f"    [HTTP {res.status_code}] {film_url}")
+                return ""
+            
+            content = res.text
+            soup = BeautifulSoup(content, 'html.parser')
 
-                # --- STRATEJİ 2: Doğrudan link ---
-                rapid_match = re.search(
-                    r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/[a-zA-Z0-9]+',
-                    content
-                )
-                if rapid_match:
-                    return rapid_match.group(0).replace('\\', '')
-
-                # --- STRATEJİ 3: ID olarak geçiyorsa ---
-                id_match = re.search(
-                    r'["\']?(?:vid|video_id|id)["\']?\s*[:=]\s*["\']([a-zA-Z0-9]{5,})["\']',
-                    content
-                )
-                if id_match:
-                    return f"https://rapidvid.net/vod/{id_match.group(1)}"
-
-                # --- STRATEJİ 4: BeautifulSoup ile iframe (hem src hem data-src) ---
-                soup = BeautifulSoup(content, 'html.parser')
-                for iframe in soup.find_all('iframe'):
+            # --- STRATEJİ 1: BeautifulSoup ile #plx div içindeki iframe data-src (EN GÜVENİLİR) ---
+            plx_div = soup.find('div', id='plx')
+            if plx_div:
+                iframe = plx_div.find('iframe')
+                if iframe:
                     src = iframe.get('data-src') or iframe.get('src') or ''
-                    if 'rapidvid' in src or 'rapid' in src or 'player' in src or 'embed' in src:
+                    if src:
+                        print(f"      [S1-plx] {src}")
                         return "https:" + src if src.startswith("//") else src
+
+            # --- STRATEJİ 2: Herhangi bir iframe data-src içinde v1x... formatı ---
+            # Sadece alfanümerik (v1x ile başlayan) formatı kabul et
+            data_src_match = re.search(
+                r'data-src=["\']([^"\']*rapidvid\.net/(?:vod|v|embed)/v[a-zA-Z0-9]+[^"\']*)["\']',
+                content
+            )
+            if data_src_match:
+                src = data_src_match.group(1)
+                print(f"      [S2-regex] {src}")
+                return "https:" + src if src.startswith("//") else src
+
+            # --- STRATEJİ 3: Tüm rapidvid linklerini bul, v1x... formatını önceliklendir ---
+            all_rapid = re.findall(
+                r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)',
+                content
+            )
+            if all_rapid:
+                # v ile başlayanları önceliklendir (v1xaadef5ab gibi)
+                for vid_id in all_rapid:
+                    if vid_id.startswith('v'):
+                        url = f"https://rapidvid.net/vod/{vid_id}"
+                        print(f"      [S3-vx] {url}")
+                        return url
+                # v ile başlayan yoksa ilkini döndür
+                url = f"https://rapidvid.net/vod/{all_rapid[0]}"
+                print(f"      [S3-fallback] {url}")
+                return url
+
+            # --- STRATEJİ 4: Tüm iframe data-src/src içinde rapidvid ara ---
+            for iframe in soup.find_all('iframe'):
+                src = iframe.get('data-src') or iframe.get('src') or ''
+                if 'rapidvid' in src:
+                    print(f"      [S4-iframe] {src}")
+                    return "https:" + src if src.startswith("//") else src
 
     except Exception as e:
         print(f"    [HATA] {film_url} -> {e}")
@@ -67,7 +84,9 @@ def sayfa_cek(page_num):
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
+            print(f"  [HTTP {response.status_code}] Sayfa {page_num}")
             return False
+
         soup = BeautifulSoup(response.text, 'html.parser')
         films = soup.find_all('li', class_='film')
         
