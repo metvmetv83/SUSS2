@@ -4,75 +4,61 @@ import json
 import os
 import time
 import re
+import random
 
 # Klasör kontrolü
 if not os.path.exists('data'):
     os.makedirs('data')
 
-def detay_linki_cek(film_url):
+def detay_linki_cek(film_url, session):
     """
-    Film sayfasındaki gizli Rapidvid ID'sini bulur ve linki oluşturur.
+    Karmaşık ID'leri (v1xaadef5ab) bulur ve linki oluşturur.
     """
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Referer': 'https://www.fullhdfilmizlesene.live/',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Referer': film_url,
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive'
     }
     
     try:
-        # Session kullanımı bağlantıyı canlı tutar ve hızı artırır
-        with requests.Session() as s:
-            res = s.get(film_url, headers=headers, timeout=15)
-            if res.status_code == 200:
-                content = res.text
-                
-                # --- STRATEJİ 1: Doğrudan Rapidvid Linkini Ara ---
-                # Sayfa içinde https://rapidvid.net/vod/v1... gibi geçenleri yakalar
-                rapid_pattern = r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9_-]+)'
-                match = re.search(rapid_pattern, content)
-                if match:
-                    # Eşleşen ID'yi al ve istediğin formatta döndür
-                    video_id = match.group(1)
-                    return f"https://rapidvid.net/vod/{video_id}"
+        res = session.get(film_url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            content = res.text
+            
+            # 1. Strateji: v1 ile başlayan karmaşık ID'yi ara
+            # Örnek: v1xaadef5ab
+            v_id_match = re.search(r'["\'](v[a-zA-Z0-9]{5,15})["\']', content)
+            if v_id_match:
+                return f"https://rapidvid.net/vod/{v_id_match.group(1)}"
 
-                # --- STRATEJİ 2: Gizli Değişkenleri Tara ---
-                # Bazı siteler sadece ID'yi saklar: videoId: "v1xaadef5ab"
-                id_patterns = [
-                    r'["\']?videoId["\']?\s*[:=]\s*["\']([a-zA-Z0-9_-]{5,})["\']',
-                    r'["\']?vid["\']?\s*[:=]\s*["\']([a-zA-Z0-9_-]{5,})["\']',
-                    r'id\s*[:=]\s*["\'](v[a-zA-Z0-9_-]+)["\']'
-                ]
-                
-                for pattern in id_patterns:
-                    id_match = re.search(pattern, content)
-                    if id_match:
-                        return f"https://rapidvid.net/vod/{id_match.group(1)}"
+            # 2. Strateji: Tam link olarak geçiyorsa yakala
+            rapid_match = re.search(r'rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9_-]+)', content)
+            if rapid_match:
+                return f"https://rapidvid.net/vod/{rapid_match.group(1)}"
 
-                # --- STRATEJİ 3: BeautifulSoup ile Iframe Taraması ---
-                soup = BeautifulSoup(content, 'html.parser')
-                for iframe in soup.find_all('iframe'):
-                    src = iframe.get('data-src') or iframe.get('src') or ""
-                    if "rapidvid" in src:
-                        # Linkin içindeki ID'yi ayıkla
-                        id_extract = re.search(r'/(?:vod|v|embed)/([a-zA-Z0-9_-]+)', src)
-                        if id_extract:
-                            return f"https://rapidvid.net/vod/{id_extract.group(1)}"
-    except Exception as e:
-        print(f"      ! Hata: {e}")
-        
+    except Exception:
+        pass
     return ""
 
-def sayfa_cek(page_num):
+def sayfa_cek(page_num, session):
     base_url = "https://www.fullhdfilmizlesene.live/yeni-filmler/"
     url = base_url if page_num == 1 else f"{base_url}page/{page_num}/"
     
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    }
 
     try:
-        response = requests.get(url, headers=headers, timeout=20)
+        # Sitenin korumasını aşmak için kısa bir mola
+        time.sleep(random.uniform(2, 4)) 
+        
+        response = session.get(url, headers=headers, timeout=20)
+        
+        # Eğer site 403 veya 429 verirse (Engellendiğimizi anlarız)
         if response.status_code != 200:
-            print(f"Hata: Sayfa {page_num} alınamadı.")
-            return False
+            print(f"!!! Hata: Durum Kodu {response.status_code} (Site muhtemelen engelledi)")
+            return "retry"
 
         soup = BeautifulSoup(response.text, 'html.parser')
         films = soup.find_all('li', class_='film')
@@ -87,41 +73,45 @@ def sayfa_cek(page_num):
             
             if title_tag and link_tag:
                 f_url = link_tag['href'].rstrip('/')
-                t_text = title_tag.get_text(strip=True)
+                print(f"    > Kaynak: {title_tag.text[:30]}...")
                 
-                print(f"    > Kaynak Aranıyor: {t_text}")
-                rapid_link = detay_linki_cek(f_url)
+                rapid_link = detay_linki_cek(f_url, session)
 
                 movie_data.append({
-                    "title": t_text,
+                    "title": title_tag.text,
                     "link": f_url,
                     "rapid_link": rapid_link,
-                    "imdb": film.find('span', class_='imdb').get_text(strip=True) if film.find('span', class_='imdb') else "0",
-                    "year": film.find('span', class_='film-yil').get_text(strip=True) if film.find('span', class_='film-yil') else "",
+                    "imdb": film.find('span', class_='imdb').text if film.find('span', class_='imdb') else "0",
+                    "year": film.find('span', class_='film-yil').text if film.find('span', class_='film-yil') else "",
                     "image": (film.find('img').get('data-src') or film.find('img').get('src')) if film.find('img') else ""
                 })
-                # Ban yememek için 1 saniye mola
-                time.sleep(1)
+                # Her film arası kısa rastgele bekleme
+                time.sleep(random.uniform(1, 2))
 
         if movie_data:
-            file_name = f'data/yeni-filmler-{page_num}.json'
-            with open(file_name, 'w', encoding='utf-8') as f:
+            with open(f'data/yeni-filmler-{page_num}.json', 'w', encoding='utf-8') as f:
                 json.dump(movie_data, f, ensure_ascii=False, indent=4)
-            print(f"--- Sayfa {page_num} Kaydedildi ---")
             return True
     except Exception as e:
-        print(f"Sayfa {page_num} hatası: {e}")
+        print(f"Sistem Hatası: {e}")
         return False
 
 def main():
-    print("--- RAPIDVID TARAYICI BAŞLATILDI ---")
-    # Sayfa 1'den 1113'e kadar
+    session = requests.Session()
+    print("--- RAPIDVID (v1 ID) TARAYICI BAŞLATILDI ---")
+    
+    # Hata aldığın sayfa 268'den başlatabilirsin veya 1'den devam edebilirsin
     for p in range(1, 1114):
-        # Mevcut sayfayı atlamıyoruz, çünkü linkleri yeni formatta bulmamız lazım
-        print(f"\n--- İşlem: Sayfa {p} ---")
-        success = sayfa_cek(p)
-        if not success:
-            time.sleep(5)
+        # Eğer dosya zaten varsa ve içi doluysa atla (Zaman kazanmak için)
+        if os.path.exists(f'data/yeni-filmler-{p}.json'):
+            continue
 
+        print(f"\n--- İşlem: Sayfa {p} ---")
+        result = sayfa_cek(p, session)
+        
+        if result == "retry":
+            print("Engellendik! 60 saniye mola veriliyor...")
+            time.sleep(60) # 1 dakika bekle ve sonraki sayfaya geçmeye çalış
+            
 if __name__ == "__main__":
     main()
