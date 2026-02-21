@@ -99,7 +99,7 @@ def sayfa_cek(page_num):
 def main():
     # Mevcut dosyaları silmek istersen manuel silebilirsin veya
     # üzerine yazması için checkpoint kontrolünü kaldırdım.
-    for p in range(1, 1114):
+    for p in range(1, 11):
         print(f"\n--- Sayfa {p} İşleniyor ---")
         success = sayfa_cek(p)
         if not success:
