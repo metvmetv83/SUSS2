@@ -27,7 +27,7 @@ def detay_linki_cek(film_url):
             content = res.text
             soup = BeautifulSoup(content, 'html.parser')
 
-            # --- STRATEJİ 1: BeautifulSoup ile #plx div içindeki iframe data-src (EN GÜVENİLİR) ---
+            # --- STRATEJİ 1: #plx div içindeki iframe data-src ---
             plx_div = soup.find('div', id='plx')
             if plx_div:
                 iframe = plx_div.find('iframe')
@@ -37,8 +37,7 @@ def detay_linki_cek(film_url):
                         print(f"      [S1-plx] {src}")
                         return "https:" + src if src.startswith("//") else src
 
-            # --- STRATEJİ 2: Herhangi bir iframe data-src içinde v1x... formatı ---
-            # Sadece alfanümerik (v1x ile başlayan) formatı kabul et
+            # --- STRATEJİ 2: data-src içinde v1x... formatı ---
             data_src_match = re.search(
                 r'data-src=["\']([^"\']*rapidvid\.net/(?:vod|v|embed)/v[a-zA-Z0-9]+[^"\']*)["\']',
                 content
@@ -48,24 +47,22 @@ def detay_linki_cek(film_url):
                 print(f"      [S2-regex] {src}")
                 return "https:" + src if src.startswith("//") else src
 
-            # --- STRATEJİ 3: Tüm rapidvid linklerini bul, v1x... formatını önceliklendir ---
+            # --- STRATEJİ 3: Tüm rapidvid linkleri, v ile başlayanı önceliklendir ---
             all_rapid = re.findall(
                 r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/([a-zA-Z0-9]+)',
                 content
             )
             if all_rapid:
-                # v ile başlayanları önceliklendir (v1xaadef5ab gibi)
                 for vid_id in all_rapid:
                     if vid_id.startswith('v'):
                         url = f"https://rapidvid.net/vod/{vid_id}"
                         print(f"      [S3-vx] {url}")
                         return url
-                # v ile başlayan yoksa ilkini döndür
                 url = f"https://rapidvid.net/vod/{all_rapid[0]}"
                 print(f"      [S3-fallback] {url}")
                 return url
 
-            # --- STRATEJİ 4: Tüm iframe data-src/src içinde rapidvid ara ---
+            # --- STRATEJİ 4: Tüm iframe içinde rapidvid ara ---
             for iframe in soup.find_all('iframe'):
                 src = iframe.get('data-src') or iframe.get('src') or ''
                 if 'rapidvid' in src:
@@ -83,13 +80,19 @@ def sayfa_cek(page_num):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 404:
+            return "404"
         if response.status_code != 200:
             print(f"  [HTTP {response.status_code}] Sayfa {page_num}")
             return False
 
         soup = BeautifulSoup(response.text, 'html.parser')
         films = soup.find_all('li', class_='film')
-        
+
+        if not films:
+            print(f"  [BOŞ SAYFA] Sayfa {page_num}")
+            return "404"  # Film yoksa da dur
+
         movie_data = []
         for film in films:
             title = film.find('span', class_='film-title')
@@ -122,9 +125,21 @@ def sayfa_cek(page_num):
         return False
 
 def main():
-    for p in range(1, 1114):
+    consecutive_404 = 0
+    max_consecutive_404 = 3  # Arka arkaya 3 sayfa 404 gelirse dur
+
+    for p in range(1, 9999):  # Üst sınırı yüksek tut, otomatik duracak
         print(f"\n--- Sayfa {p} ---")
-        sayfa_cek(p)
+        result = sayfa_cek(p)
+
+        if result == "404":
+            consecutive_404 += 1
+            print(f"  [404 Sayacı: {consecutive_404}/{max_consecutive_404}]")
+            if consecutive_404 >= max_consecutive_404:
+                print(f"\n✓ {max_consecutive_404} arka arkaya 404 — tüm sayfalar çekildi. Son sayfa: {p - max_consecutive_404}")
+                break
+        else:
+            consecutive_404 = 0  # Başarılı sayfada sıfırla
 
 if __name__ == "__main__":
     main()
