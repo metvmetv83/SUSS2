@@ -1,12 +1,11 @@
 name: Film Botu Calistir
-
 on:
   schedule:
-    - cron: '0 * * * *' # Her saat başı otomatik çalışır
-  workflow_dispatch: # Senin manuel olarak başlatmanı sağlar
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 permissions:
-  contents: write # GitHub'ın dosyaları depona kaydetmesi için şarttır
+  contents: write
 
 jobs:
   build:
@@ -21,7 +20,10 @@ jobs:
           python-version: '3.9'
 
       - name: Kütüphaneleri Yukle
-        run: pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4 playwright
+
+      - name: Playwright Chromium Kur
+        run: playwright install chromium --with-deps
 
       - name: Botu Calistir
         run: python fulhdfilm.py
@@ -30,13 +32,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Yeni dosyaları ve klasörü Git takibine al
           git add data/
-          git add data/*.json
-          
-          # Eğer değişiklik varsa commit yap, yoksa hata vermeden geç
-          git commit -m "Film verileri güncellendi (1113 Sayfa)" || echo "Değişiklik yok."
-          
-          # Verileri depoya gönder
+          git commit -m "Film verileri güncellendi" || echo "Değişiklik yok."
           git push
