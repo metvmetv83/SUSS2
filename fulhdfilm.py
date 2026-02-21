@@ -81,7 +81,7 @@ def sayfa_cek(page_num):
 
 def main():
     baslangic = 1
-    bitis = 111 
+    bitis = 18 
     
     print("İşlem başlıyor...")
     for p in range(baslangic, bitis + 1):
