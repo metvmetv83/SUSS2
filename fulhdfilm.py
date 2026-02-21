@@ -9,33 +9,44 @@ from playwright.async_api import async_playwright
 if not os.path.exists('data'):
     os.makedirs('data')
 
-# Çekilecek tüm kategoriler
 KATEGORILER = [
-    {"slug": "yeni-filmler",        "dosya": "yeni-filmler"},
-    {"slug": "en-cok-izlenen-filmler", "dosya": "en-cok-izlenen"},
-    {"slug": "trend-filmler",       "dosya": "trend-filmler"},
-    {"slug": "populer-filmler",     "dosya": "populer-filmler"},
-    {"slug": "filmizle/aksiyon-filmleri",    "dosya": "aksiyon"},
-    {"slug": "filmizle/korku-filmleri",      "dosya": "korku"},
-    {"slug": "filmizle/komedi-filmleri",     "dosya": "komedi"},
-    {"slug": "filmizle/dram-filmleri",       "dosya": "dram"},
-    {"slug": "filmizle/bilim-kurgu-filmleri","dosya": "bilim-kurgu"},
-    {"slug": "filmizle/animasyon-filmleri",  "dosya": "animasyon"},
-    {"slug": "filmizle/gerilim-filmleri",    "dosya": "gerilim"},
-    {"slug": "filmizle/romantik-filmler",    "dosya": "romantik"},
-    {"slug": "filmizle/aile-filmleri",       "dosya": "aile"},
-    {"slug": "filmizle/macera-filmleri",     "dosya": "macera"},
-    {"slug": "filmizle/fantastik-filmler",   "dosya": "fantastik"},
-    {"slug": "filmizle/yerli-filmler",       "dosya": "yerli"},
-    {"slug": "filmizle/turkce-dublaj-filmler","dosya": "dublaj"},
+    {"slug": "yeni-filmler",                    "dosya": "yeni-filmler"},
+    {"slug": "en-cok-izlenen-filmler",          "dosya": "en-cok-izlenen"},
+    {"slug": "trend-filmler",                   "dosya": "trend-filmler"},
+    {"slug": "populer-filmler",                 "dosya": "populer-filmler"},
+    {"slug": "filmizle/aksiyon-filmleri",       "dosya": "aksiyon"},
+    {"slug": "filmizle/korku-filmleri",         "dosya": "korku"},
+    {"slug": "filmizle/komedi-filmleri",        "dosya": "komedi"},
+    {"slug": "filmizle/dram-filmleri",          "dosya": "dram"},
+    {"slug": "filmizle/bilim-kurgu-filmleri",   "dosya": "bilim-kurgu"},
+    {"slug": "filmizle/animasyon-filmleri",     "dosya": "animasyon"},
+    {"slug": "filmizle/gerilim-filmleri",       "dosya": "gerilim"},
+    {"slug": "filmizle/romantik-filmler",       "dosya": "romantik"},
+    {"slug": "filmizle/aile-filmleri",          "dosya": "aile"},
+    {"slug": "filmizle/macera-filmleri",        "dosya": "macera"},
+    {"slug": "filmizle/fantastik-filmler",      "dosya": "fantastik"},
+    {"slug": "filmizle/yerli-filmler",          "dosya": "yerli"},
+    {"slug": "filmizle/turkce-dublaj-filmler",  "dosya": "dublaj"},
     {"slug": "filmizle/turkce-altyazili-filmler","dosya": "altyazili"},
-    {"slug": "yil/2026-filmleri-izle",       "dosya": "2026"},
-    {"slug": "yil/2025-filmleri-izle",       "dosya": "2025"},
-    {"slug": "yil/2024-filmleri-izle",       "dosya": "2024"},
+    {"slug": "yil/2026-filmleri-izle",          "dosya": "2026"},
+    {"slug": "yil/2025-filmleri-izle",          "dosya": "2025"},
+    {"slug": "yil/2024-filmleri-izle",          "dosya": "2024"},
 ]
 
 BASE = "https://www.fullhdfilmizlesene.live"
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'}
+
+def sayfa_url_olustur(slug, page_num):
+    """
+    Sayfa URL formatı:
+    Sayfa 1: https://site.com/yeni-filmler/
+    Sayfa 2: https://site.com/yeni-filmler/2
+    Sayfa 3: https://site.com/yeni-filmler/3
+    """
+    if page_num == 1:
+        return f"{BASE}/{slug}/"
+    else:
+        return f"{BASE}/{slug}/{page_num}"
 
 async def rapid_link_cek(page, film_url):
     try:
@@ -56,7 +67,10 @@ async def rapid_link_cek(page, film_url):
                 pass
 
         content = await page.content()
-        match = re.search(r'https?://(?:rapidvid\.net|cdn\.imgz\.me)/(?:vod|player/ifr/vod)/[a-zA-Z0-9]+', content)
+        match = re.search(
+            r'https?://(?:rapidvid\.net|cdn\.imgz\.me)/(?:vod|player/ifr/vod)/[a-zA-Z0-9]+',
+            content
+        )
         if match:
             return match.group(0)
 
@@ -64,16 +78,16 @@ async def rapid_link_cek(page, film_url):
         print(f"      [HATA] {e}")
     return ""
 
-def film_listesi_cek(kategori_slug, page_num):
-    """requests ile film listesini çek"""
-    base_url = f"{BASE}/{kategori_slug}/"
-    url = base_url if page_num == 1 else f"{base_url}page/{page_num}/"
+def film_listesi_cek(slug, page_num):
+    url = sayfa_url_olustur(slug, page_num)
+    print(f"  URL: {url}")
 
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code == 404:
             return "404", []
         if r.status_code != 200:
+            print(f"  [HTTP {r.status_code}]")
             return False, []
 
         soup = BeautifulSoup(r.text, 'html.parser')
@@ -130,7 +144,6 @@ async def kategori_cek(pw_page, kategori):
 
         print(f"  {len(filmler)} film bulundu")
 
-        # Her film için rapidvid linkini Playwright ile çek
         for film in filmler:
             print(f"    > {film['title']}")
             film['rapid_link'] = await rapid_link_cek(pw_page, film['link'])
@@ -138,7 +151,6 @@ async def kategori_cek(pw_page, kategori):
 
         toplam_film += len(filmler)
 
-        # JSON kaydet
         dosya = f"data/{dosya_prefix}-{page_num}.json"
         with open(dosya, 'w', encoding='utf-8') as f:
             json.dump(filmler, f, ensure_ascii=False, indent=4)
@@ -161,7 +173,7 @@ async def main():
             await kategori_cek(pw_page, kategori)
 
         await browser.close()
-        print("\n✓ Tüm kategoriler tamamlandı. Playwright kapatıldı.")
+        print("\n✓ Tüm kategoriler tamamlandı.")
 
 if __name__ == "__main__":
     asyncio.run(main())
