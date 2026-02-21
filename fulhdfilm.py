@@ -5,48 +5,52 @@ import os
 import time
 import re
 
-# Klasör kontrolü
+# 1. Klasör ve Ayarlar
 if not os.path.exists('data'):
     os.makedirs('data')
 
-# Session yapılandırması
+# Session ve Header yapılandırması (Cloudflare ve Bot engelini aşmak için)
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'tr-TR,tr;q=0.8,en-US;q=0.5,en;q=0.3',
     'Referer': 'https://www.fullhdfilmizlesene.live/'
 })
 
 def detay_linki_cek(film_url):
     """
-    Özellikle rapidvid.net ve dinamik video ID'lerini yakalamaya odaklanır.
+    Rapidvid ve gizli player linklerini yakalamak için hibrit tarama yapar.
     """
     try:
-        res = session.get(film_url, timeout=10)
+        # İstek atarken o sayfanın referer bilgisini kullan
+        res = session.get(film_url, timeout=12, headers={'Referer': film_url})
         if res.status_code == 200:
             content = res.text
             
-            # 1. ADIM: Doğrudan Link Arama (Regex ile Rapidvid Odaklı)
-            # Sayfa içinde rapidvid.net geçen her şeyi yakalar
-            rapidvid_match = re.search(r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/[a-zA-Z0-9]+', content)
-            if rapidvid_match:
-                return rapidvid_match.group(0)
+            # --- YÖNTEM 1: Regex ile RapidVid Arama ---
+            # Sayfa içinde gizli scriptlerin arasındaki linki cımbızla çeker
+            rapid_pattern = r'https?://(?:www\.)?rapidvid\.net/(?:vod|v|embed)/[a-zA-Z0-9]+'
+            match = re.search(rapid_pattern, content)
+            if match:
+                return match.group(0).replace('\\', '')
 
-            # 2. ADIM: iframe İçindeki data-src veya src Kontrolü
+            # --- YÖNTEM 2: iframe ve data-src Kontrolü ---
             soup = BeautifulSoup(content, 'html.parser')
-            iframes = soup.find_all('iframe')
-            for iframe in iframes:
+            # id="plx" veya genel iframe'leri tara
+            for iframe in soup.find_all('iframe'):
                 src = iframe.get('data-src') or iframe.get('src') or ""
-                if "rapidvid" in src or "rapid" in src:
+                if "rapid" in src or "vid" in src:
+                    # Link // ile başlıyorsa protokol ekle
                     return "https:" + src if src.startswith("//") else src
 
-            # 3. ADIM: Sayfa İçindeki Gizli ID'lerden Link Oluşturma
-            # Bazı siteler sadece ID'yi saklar: video_id = "v1xaadef5ab"
-            id_match = re.search(r'(?:video_id|vid|id)\s*[:=]\s*["\']([a-zA-Z0-9]+)["\']', content)
-            if id_match:
-                video_id = id_match.group(1)
-                # Eğer ID uzunluğu makul ise (örn 10-12 karakter) rapidvid formatına sok
-                if 8 <= len(video_id) <= 15:
-                    return f"https://rapidvid.net/vod/{video_id}"
+            # --- YÖNTEM 3: JSON/Script Değişken Taraması ---
+            # Bazı siteler: video_url: "..." şeklinde saklar
+            var_match = re.search(r'["\']?(?:url|file|source|link)["\']?\s*[:=]\s*["\'](https?://[^"\']+)["\']', content)
+            if var_match:
+                candidate = var_match.group(1).replace('\\', '')
+                if "rapid" in candidate:
+                    return candidate
 
     except Exception as e:
         print(f"      ! Hata: {e}")
@@ -59,11 +63,14 @@ def sayfa_cek(page_num):
     try:
         response = session.get(url, timeout=15)
         if response.status_code != 200:
+            print(f"Hata: Sayfa {page_num} durum kodu {response.status_code}")
             return False
 
         soup = BeautifulSoup(response.text, 'html.parser')
         films = soup.find_all('li', class_='film')
         
+        if not films: return False
+
         movie_data = []
         for film in films:
             title_tag = film.find('span', class_='film-title')
@@ -84,7 +91,7 @@ def sayfa_cek(page_num):
                     "year": film.find('span', class_='film-yil').get_text(strip=True) if film.find('span', class_='film-yil') else "",
                     "image": (film.find('img').get('data-src') or film.find('img').get('src')) if film.find('img') else ""
                 })
-                time.sleep(1) # Siteyi yormadan ilerle
+                time.sleep(1) # Siteyi bloklamamak için
 
         if movie_data:
             file_name = f'data/yeni-filmler-{page_num}.json'
@@ -93,17 +100,24 @@ def sayfa_cek(page_num):
             print(f"--- Sayfa {page_num} Kaydedildi ---")
             return True
     except Exception as e:
-        print(f"Hata: {e}")
+        print(f"Sayfa {page_num} hatası: {e}")
         return False
 
 def main():
-    # Mevcut dosyaları silmek istersen manuel silebilirsin veya
-    # üzerine yazması için checkpoint kontrolünü kaldırdım.
-    for p in range(1, 11):
-        print(f"\n--- Sayfa {p} İşleniyor ---")
+    baslangic = 1
+    bitis = 1113 # İsteğe göre ayarlanabilir
+    
+    print("=== RAPIDVID ODAKLI BOT BASLADI ===")
+    for p in range(baslangic, bitis + 1):
+        # Eğer GitHub Actions'ta zaman yetmiyorsa, mevcut dosyayı atlayabiliriz
+        if os.path.exists(f'data/yeni-filmler-{p}.json'):
+             print(f"--- Sayfa {p} zaten var, atlanıyor. ---")
+             continue
+
         success = sayfa_cek(p)
         if not success:
+            print(f"Sayfa {p} çekilemedi, 5 saniye mola.")
             time.sleep(5)
-
+            
 if __name__ == "__main__":
     main()
