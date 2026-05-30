@@ -3,7 +3,8 @@ import json
 import os
 import re
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+# Standart playwright yerine undetected_playwright kullanıyoruz
+from undetected_playwright.async_api import async_playwright
 
 if not os.path.exists('data'):
     os.makedirs('data')
@@ -13,10 +14,9 @@ SONUC_DOSYA = "data/tum_filmler.json"
 PARALEL = 2
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Upgrade-Insecure-Requests': '1'
 }
 
 PLAYER_PATTERNS = [
@@ -40,29 +40,14 @@ def kaydet(filmler_dict):
     with open(SONUC_DOSYA, 'w', encoding='utf-8') as f:
         json.dump(list(filmler_dict.values()), f, ensure_ascii=False, indent=2)
 
-async def anti_bot_enjekte_et(context):
-    # Kütüphane kullanmadan tarayıcıyı insan gibi gösterme hilesi
-    await context.add_init_script("""
-        # webdriver bayrağını sil
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        # Chrome nesnesini taklit et
-        window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {} };
-        # Eklentileri varmış gibi göster
-        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        # Dilleri ayarla
-        Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']});
-    """)
-
 async def sayfa_filmlerini_cek_playwright(browser, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     
     context = await browser.new_context(
         user_agent=HEADERS['User-Agent'],
-        extra_http_headers=HEADERS,
         locale="tr-TR",
         timezone_id="Europe/Istanbul"
     )
-    await anti_bot_enjekte_et(context)
     page = await context.new_page()
     
     try:
@@ -70,10 +55,10 @@ async def sayfa_filmlerini_cek_playwright(browser, page_num):
                          if route.request.resource_type in ["image", "font", "media"] 
                          else route.continue_())
         
-        response = await page.goto(url, timeout=30000, wait_until='networkidle')
+        # Cloudflare'in çözülmesi için 5 saniye tolerans tanıyoruz
+        response = await page.goto(url, timeout=30000)
+        await page.wait_for_timeout(5000) 
         
-        if not response:
-            return None
         if response.status == 403:
             print(f"❌ Sayfa {page_num} hâlâ 403 veriyor. Cloudflare geçilemedi.")
             return None
@@ -110,11 +95,9 @@ async def sayfa_filmlerini_cek_playwright(browser, page_num):
 async def rapid_link_cek(browser, film_url, deneme=2):
     context = await browser.new_context(
         user_agent=HEADERS['User-Agent'],
-        extra_http_headers=HEADERS,
         viewport={'width': 1280, 'height': 720},
         locale="tr-TR"
     )
-    await anti_bot_enjekte_et(context)
     
     for attempt in range(deneme):
         page = await context.new_page()
@@ -133,8 +116,8 @@ async def rapid_link_cek(browser, film_url, deneme=2):
                         break
 
             page.on("request", on_request)
-            await page.goto(film_url, timeout=30000, wait_until='networkidle')
-            await page.wait_for_timeout(4000)
+            await page.goto(film_url, timeout=30000)
+            await page.wait_for_timeout(5000)
 
             if caught_url:
                 await page.close()
@@ -173,21 +156,14 @@ async def main():
     print(f"  → {dolu} filmde link var, {len(bos)} filmde link boş\n")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox', 
-                '--disable-dev-shm-usage', 
-                '--disable-blink-features=AutomationControlled',
-                '--disable-infobars'
-            ]
-        )
+        # undetected_playwright için özel başlatma (headless modda bile cloudflare geçer)
+        browser = await p.chromium.launch(headless=True)
 
         print("=== AŞAMA 1: Yeni filmler taranıyor ===")
         bos_sayfa = 0
         for page_num in range(1, 20):
             filmler = await sayfa_filmlerini_cek_playwright(browser, page_num)
-            await asyncio.sleep(2) 
+            await asyncio.sleep(3) # Bloklanmamak için her sayfa arası makul bekleme
             
             if filmler is None:
                 bos_sayfa += 1
@@ -231,7 +207,7 @@ async def main():
                 kaydet(filmler_dict)
                 dolu_sayisi = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
                 print(f"\n💾 İlerleme Kaydedildi — {islenen}/{len(bos_filmler)} film tarandı.\n")
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
 
         await browser.close()
 
