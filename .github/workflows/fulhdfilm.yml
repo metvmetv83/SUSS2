@@ -1,8 +1,8 @@
 name: Film Botu Calistir
 on:
   schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
+    - cron: '0 * * * *'  # Her saat başı çalışır
+  workflow_dispatch:     # Manuel tetikleme butonu ekler
 
 permissions:
   contents: write
@@ -17,10 +17,13 @@ jobs:
       - name: Python Kur
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10' # Daha kararlı ve güncel bir Python sürümü
 
       - name: Kütüphaneleri Yukle
-        run: pip install requests beautifulsoup4 playwright
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 playwright playwright-stealth
+          # Gelecekte stealth kütüphanesini kullanmak isterseniz hata vermemesi için buraya ekledik.
 
       - name: Playwright Chromium Kur
         run: playwright install chromium --with-deps
@@ -32,6 +35,15 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # data klasörünün varlığından emin olalım ve git takibine alalım
+          mkdir -p data
           git add data/
-          git commit -m "Film verileri güncellendi" || echo "Değişiklik yok."
-          git push
+          
+          # Sadece değişiklik varsa commit yap ve pushla
+          if ! git diff --cached --quiet; then
+            git commit -m "Film verileri güncellendi [skip ci]"
+            git push
+          else
+            echo "Herhangi bir değişiklik tespit edilmedi, commit atlanıyor."
+          fi
