@@ -9,7 +9,7 @@ from playwright.async_api import async_playwright
 if not os.path.exists('data'):
     os.makedirs('data')
 
-BASE = "https://www.fullhdfilmizlesene.live"
+BASE = "https://www.fullhdfilmizlesene.life"
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'}
 SONUC_DOSYA = "data/tum_filmler.json"
 PARALEL = 4  # Bot koruması için düşürüldü
