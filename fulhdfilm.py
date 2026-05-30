@@ -4,16 +4,14 @@ import os
 import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async  # Bot korumasını aşmak için eklendi
 
 if not os.path.exists('data'):
     os.makedirs('data')
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 2  # Koruma sıkı olduğu için paralelliği geçici olarak düşük tutuyoruz
+PARALEL = 2
 
-# Gerçekçi tarayıcı başlıkları
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -42,34 +40,40 @@ def kaydet(filmler_dict):
     with open(SONUC_DOSYA, 'w', encoding='utf-8') as f:
         json.dump(list(filmler_dict.values()), f, ensure_ascii=False, indent=2)
 
+async def anti_bot_enjekte_et(context):
+    # Kütüphane kullanmadan tarayıcıyı insan gibi gösterme hilesi
+    await context.add_init_script("""
+        # webdriver bayrağını sil
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        # Chrome nesnesini taklit et
+        window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {} };
+        # Eklentileri varmış gibi göster
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        # Dilleri ayarla
+        Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']});
+    """)
+
 async def sayfa_filmlerini_cek_playwright(browser, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     
-    # Gerçek tarayıcı davranış profili oluşturma
     context = await browser.new_context(
         user_agent=HEADERS['User-Agent'],
         extra_http_headers=HEADERS,
         locale="tr-TR",
         timezone_id="Europe/Istanbul"
     )
+    await anti_bot_enjekte_et(context)
     page = await context.new_page()
     
-    # Gizlilik modunu sayfaya enjekte et (Cloudflare koruması için kritik)
-    await stealth_async(page)
-    
     try:
-        # Reklam/Resim engelleme (Süreci hızlandırmak için)
         await page.route("**/*", lambda route: route.abort() 
                          if route.request.resource_type in ["image", "font", "media"] 
                          else route.continue_())
         
-        # Sitenin anti-bot doğrulamasını tamamlaması için ağın sakinleşmesini bekle (networkidle)
         response = await page.goto(url, timeout=30000, wait_until='networkidle')
         
         if not response:
-            print(f"⚠️ Sayfa {page_num}: Yanıt alınamadı.")
             return None
-            
         if response.status == 403:
             print(f"❌ Sayfa {page_num} hâlâ 403 veriyor. Cloudflare geçilemedi.")
             return None
@@ -97,7 +101,7 @@ async def sayfa_filmlerini_cek_playwright(browser, page_num):
                 })
         return filmler
     except Exception as e:
-        print(f"⚠️ Sayfa {page_num} taranırken hata: {str(e)}")
+        print(f"⚠️ Sayfa {page_num} hatası: {str(e)}")
         return None
     finally:
         await page.close()
@@ -110,10 +114,10 @@ async def rapid_link_cek(browser, film_url, deneme=2):
         viewport={'width': 1280, 'height': 720},
         locale="tr-TR"
     )
+    await anti_bot_enjekte_et(context)
     
     for attempt in range(deneme):
         page = await context.new_page()
-        await stealth_async(page)
         try:
             await page.route("**/*", lambda route: route.abort()
                 if route.request.resource_type in ["image", "font"]
@@ -137,7 +141,6 @@ async def rapid_link_cek(browser, film_url, deneme=2):
                 await context.close()
                 return caught_url[0]
 
-            # DOM iframe Kontrolü
             iframe_selectors = ['#plx iframe', '.player-box iframe', 'iframe[src*="rapid"]', 'iframe']
             for selector in iframe_selectors:
                 try:
@@ -170,25 +173,20 @@ async def main():
     print(f"  → {dolu} filmde link var, {len(bos)} filmde link boş\n")
 
     async with async_playwright() as p:
-        # Otomasyon izlerini tamamen kapatmak için flag argümanları eklendi
         browser = await p.chromium.launch(
             headless=True,
             args=[
                 '--no-sandbox', 
                 '--disable-dev-shm-usage', 
                 '--disable-blink-features=AutomationControlled',
-                '--disable-infobars',
-                '--window-position=0,0'
+                '--disable-infobars'
             ]
         )
 
-        # === AŞAMA 1: Yeni sayfaları tara ===
         print("=== AŞAMA 1: Yeni filmler taranıyor ===")
         bos_sayfa = 0
-        for page_num in range(1, 20):  # Test için ilk etapta 20 sayfa sınırı koyuldu
+        for page_num in range(1, 20):
             filmler = await sayfa_filmlerini_cek_playwright(browser, page_num)
-            
-            # Bot koruması nedeniyle arka arkaya istek atmamak adına kısa bir bekleme
             await asyncio.sleep(2) 
             
             if filmler is None:
@@ -201,17 +199,16 @@ async def main():
             bos_sayfa = 0
             yeni = [f for f in filmler if f['link'] not in filmler_dict]
             if yeni:
-                print(f"Sayfa {page_num}: {len(yeni)} yeni film veritabanına eklendi.")
+                print(f"Sayfa {page_num}: {len(yeni)} yeni film eklendi.")
                 for f in yeni:
                     filmler_dict[f['link']] = f
                 kaydet(filmler_dict)
             else:
                 print(f"Sayfa {page_num}: Yeni film yok, mevcutlar güncel.")
 
-        # === AŞAMA 2: Boş rapid_link olanları doldur ===
         bos_filmler = [f for f in filmler_dict.values() if not f.get('rapid_link')]
         if bos_filmler:
-            print(f"\n=== AŞAMA 2: {len(bos_filmler)} film için iframe/video linkleri çözülüyor ===\n")
+            print(f"\n=== AŞAMA 2: {len(bos_filmler)} film için linkler çözülüyor ===\n")
             semaphore = asyncio.Semaphore(PARALEL)
 
             async def isle(film):
@@ -234,7 +231,7 @@ async def main():
                 kaydet(filmler_dict)
                 dolu_sayisi = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
                 print(f"\n💾 İlerleme Kaydedildi — {islenen}/{len(bos_filmler)} film tarandı.\n")
-                await asyncio.sleep(3) # Bloklanmamak için her grup arası bekleme
+                await asyncio.sleep(3)
 
         await browser.close()
 
