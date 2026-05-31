@@ -10,7 +10,7 @@ if not os.path.exists('data'):
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 2  # GitHub Actions'ta Cloudflare engeline takılmamak için en ideal kararlı hızdır
+PARALEL = 2  # Sunucu IP'sinin ban yememesi için en güvenli paralel akış hızı
 
 STREAM_DOMAINS = [
     "rapidvid", "vidmoly", "imgz.me", "doodstream",
@@ -85,14 +85,10 @@ def kesin_kaydet(filmler_dict):
     except Exception as e:
         print(f"⚠️ Kaydetme hatası: {e}")
 
-async def yeni_sayfa(context, engelle_media=True):
+async def yeni_sayfa(context):
     page = await context.new_page()
     await page.add_init_script(STEALTH_SCRIPT)
-    if engelle_media:
-        await page.route("**/*", lambda r: r.abort()
-            if r.request.resource_type in ["image", "font", "stylesheet", "media"]
-            else r.continue_()
-        )
+    # Cloudflare doğrulamalarının kırılmaması için CSS ve JS dosyalarının yüklenmesine tam izin veriyoruz
     return page
 
 # ─── JS: Tüm data-* attribute'larını ve script içlerini topla ─────────────────
@@ -123,11 +119,14 @@ async def sayfa_filmlerini_cek(context, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     page = await yeni_sayfa(context)
     try:
-        r = await page.goto(url, timeout=30000, wait_until='domcontentloaded')
-        await page.wait_for_timeout(1500)
-        if not r or r.status not in [200, 304]: return None
+        # Korumayı temiz geçmek için ağ yükünün hafiflemesini bekliyoruz
+        r = await page.goto(url, timeout=45000, wait_until='networkidle')
+        await page.wait_for_timeout(3000)
+        
         content = await page.content()
-        if "Just a moment" in content: return None
+        if "Just a moment" in content or not r or r.status not in [200, 304]: 
+            return None
+            
         soup = BeautifulSoup(content, 'html.parser')
         films = soup.find_all('li', class_='film')
         if not films: return None
@@ -146,8 +145,7 @@ async def sayfa_filmlerini_cek(context, page_num):
                     "rapid_link": ""
                 })
         return filmler or None
-    except Exception as e:
-        print(f"    ⚠️ {e}")
+    except Exception:
         return None
     finally:
         await page.close()
@@ -155,15 +153,16 @@ async def sayfa_filmlerini_cek(context, page_num):
 # ─── AŞAMA 2 ──────────────────────────────────────────────────────────────────
 async def rapid_link_cek(context, film_url, deneme=3):
     for attempt in range(deneme):
-        page = await yeni_sayfa(context, engelle_media=False)
+        page = await yeni_sayfa(context)
         caught = []
 
         page.on("request",  lambda r: caught.append(r.url) if stream_url_mi(r.url) else None)
         page.on("response", lambda r: (caught.append(r.url) if stream_url_mi(r.url) and r.url not in caught else None))
 
         try:
-            await page.goto(film_url, timeout=40000, wait_until='domcontentloaded')
+            await page.goto(film_url, timeout=45000, wait_until='networkidle')
 
+            # Sayfa başlığında Challenge olup olmadığını denetle
             try:
                 await page.wait_for_function(
                     "() => !document.title.includes('Just a moment')",
@@ -172,7 +171,7 @@ async def rapid_link_cek(context, film_url, deneme=3):
             except Exception:
                 pass
 
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(4000)
             if caught: return caught[0].strip()
 
             content = await page.content()
@@ -183,19 +182,14 @@ async def rapid_link_cek(context, film_url, deneme=3):
             found = html_stream_ara(content)
             if found: return found
 
-            # 2. networkidle bekleyişi
-            try: await page.wait_for_load_state('networkidle', timeout=8000)
-            except: pass
-            if caught: return caught[0].strip()
-
-            # 3. JS ile toplu data toplama
+            # 2. JS ile toplu data toplama
             try:
                 js_dump = await page.evaluate(JS_TOPLAMA)
                 found = html_stream_ara(js_dump)
                 if found: return found
             except: pass
 
-            # 4. Player'a tek temiz klik simülasyonu (Double-click bug'ını önler)
+            # 3. Player'a tek temiz klik simülasyonu
             player_sels = ['#plx', '.player-box', '#player', '.video-player',
                            '.film-player', '.izle-player', '.embed-responsive',
                            '[class*="player"]', '[id*="player"]']
@@ -205,17 +199,14 @@ async def rapid_link_cek(context, film_url, deneme=3):
                     if el and await el.is_visible():
                         await el.scroll_into_view_if_needed()
                         await page.wait_for_timeout(500)
-                        
-                        # force=True ile reklam perdesi arkasındaki asıl video alanına TEK TIKLAMA atılır
                         await el.click(timeout=3000, force=True)
-                        await page.wait_for_timeout(2500)
-                        
+                        await page.wait_for_timeout(3000)
                         if caught: return caught[0].strip()
                         break
                 except Exception:
                     continue
 
-            # 5. Kaynak / dil tablarına sırayla TEK TIKLAMA Uygulama
+            # 4. Kaynak / dil tablarına sırayla Tıklama
             tab_sels = ['.player-tabs a', '.player-tabs button',
                         '.idSec a', '.idSec button',
                         'li[data-source]', 'li[data-id]',
@@ -235,7 +226,7 @@ async def rapid_link_cek(context, film_url, deneme=3):
                 except Exception:
                     continue
 
-            # 6. Derin iFrame ve sub-frame taraması
+            # 5. Derin iFrame ve sub-frame taraması
             for frame in page.frames:
                 if frame == page.main_frame: continue
                 try:
