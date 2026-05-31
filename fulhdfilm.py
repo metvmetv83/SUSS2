@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import re
-import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
@@ -12,9 +11,8 @@ if not os.path.exists('data'):
 BASE = "https://www.fullhdfilmizlesene.life"
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'}
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 3  # Kararlılık için 3 idealdir
+PARALEL = 3
 
-# SADECE gerçek film yayıncılarının link kalıpları (Sitenin kendi domaini ve youtube elendi)
 VALID_STREAM_PATTERNS = [
     r'https?://(?:www\.)?rapidvid\.net/(?:vod|embed)/[^\s"\'<>]+',
     r'https?://cdn\.imgz\.me/[^\s"\'<>]+',
@@ -30,7 +28,6 @@ def mevcut_filmleri_yukle():
                 cleaned_dict = {}
                 for film in filmler:
                     r_link = film.get('rapid_link', '')
-                    # Eğer eski taramalardan kalan hatalı youtube veya ana sayfa linkleri varsa temizle
                     if BASE in r_link or "youtube.com" in r_link or "youtu.be" in r_link or len(r_link) < 15:
                         film['rapid_link'] = ""
                     cleaned_dict[film['link']] = film
@@ -43,21 +40,57 @@ def kaydet(filmler_dict):
     with open(SONUC_DOSYA, 'w', encoding='utf-8') as f:
         json.dump(list(filmler_dict.values()), f, ensure_ascii=False, indent=2)
 
+async def sayfa_filmlerini_cek_pw(context, page_num):
+    """ Requests yerine Playwright kullanarak sayfayı çeker (Hata önleyici) """
+    url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
+    page = await context.new_page()
+    try:
+        await page.route("**/*", lambda route: route.abort()
+            if route.request.resource_type in ["image", "font", "stylesheet"]
+            else route.continue_()
+        )
+        response = await page.goto(url, timeout=20000, wait_until='domcontentloaded')
+        if not response or response.status != 200:
+            return None
+            
+        content = await page.content()
+        soup = BeautifulSoup(content, 'html.parser')
+        films = soup.find_all('li', class_='film')
+        if not films:
+            return None
+            
+        filmler = []
+        for film in films:
+            title = film.find('span', class_='film-title')
+            link_tag = film.find('a', class_='tt')
+            if title and link_tag:
+                img = film.find('img')
+                filmler.append({
+                    "title": title.text.strip(),
+                    "link": link_tag['href'].rstrip('/'),
+                    "imdb": film.find('span', class_='imdb').text if film.find('span', class_='imdb') else "0",
+                    "year": film.find('span', class_='film-yil').text if film.find('span', class_='film-yil') else "",
+                    "image": (img.get('data-src') or img.get('src')) if img else "",
+                    "rapid_link": ""
+                })
+        return filmler
+    except:
+        return None
+    finally:
+        await page.close()
+
 async def rapid_link_cek(context, film_url, deneme=3):
     for attempt in range(deneme):
         page = await context.new_page()
         try:
-            # Botun hızlanması için gereksiz kaynakları (resim, css) engelle
             await page.route("**/*", lambda route: route.abort()
                 if route.request.resource_type in ["image", "font", "stylesheet"]
                 else route.continue_()
             )
 
-            # Ağ isteklerini dinle — Tam olarak hedef film kaynaklarını yakala
             caught_url = []
             def on_request(req):
                 url = req.url
-                # Sitenin kendi linklerini ve reklam/fragman ağ isteklerini süzgeçten geçiriyoruz
                 if BASE not in url and "youtube.com" not in url and "youtu.be" not in url:
                     for pattern in VALID_STREAM_PATTERNS:
                         if re.search(pattern, url):
@@ -65,26 +98,16 @@ async def rapid_link_cek(context, film_url, deneme=3):
                             break
 
             page.on("request", on_request)
-
-            # Sayfaya git
             await page.goto(film_url, timeout=25000, wait_until='domcontentloaded')
-
-            # Oynatıcının (Player) yüklenmesi ve JS isteklerinin tamamlanması için bekle
             await page.wait_for_timeout(3500)
 
-            # 1. Öncelik: Ağ isteği dinleyicisinden yakalanan gerçek link
             if caught_url:
                 await page.close()
                 return caught_url[0].strip()
 
-            # 2. Öncelik: Ağdan kaçtıysa, DOM üzerindeki iframe elementlerini tara
             iframe_selectors = [
-                '#plx iframe',
-                '.player-box iframe',
-                '.player-inside iframe',
-                'iframe[src*="rapidvid"]',
-                'iframe[src*="vidmoly"]',
-                'iframe[data-src]'
+                '#plx iframe', '.player-box iframe', '.player-inside iframe',
+                'iframe[src*="rapidvid"]', 'iframe[src*="vidmoly"]', 'iframe[data-src]'
             ]
 
             for selector in iframe_selectors:
@@ -108,34 +131,6 @@ async def rapid_link_cek(context, film_url, deneme=3):
 
     return ""
 
-def sayfa_filmlerini_cek(page_num):
-    url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        if r.status_code != 200:
-            return None
-        soup = BeautifulSoup(r.text, 'html.parser')
-        films = soup.find_all('li', class_='film')
-        if not films:
-            return None
-        filmler = []
-        for film in films:
-            title = film.find('span', class_='film-title')
-            link_tag = film.find('a', class_='tt')
-            if title and link_tag:
-                img = film.find('img')
-                filmler.append({
-                    "title": title.text.strip(),
-                    "link": link_tag['href'].rstrip('/'),
-                    "imdb": film.find('span', class_='imdb').text if film.find('span', class_='imdb') else "0",
-                    "year": film.find('span', class_='film-yil').text if film.find('span', class_='film-yil') else "",
-                    "image": (img.get('data-src') or img.get('src')) if img else "",
-                    "rapid_link": ""
-                })
-        return filmler
-    except:
-        return None
-
 async def main():
     filmler_dict = mevcut_filmleri_yukle()
     bos = [f for f in filmler_dict.values() if not f.get('rapid_link')]
@@ -155,16 +150,15 @@ async def main():
             java_script_enabled=True,
         )
 
-        # Otomasyon yakalayıcı duvarları bypass et
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         """)
 
-        # === AŞAMA 1: Yeni sayfaları tara ===
+        # === AŞAMA 1: Yeni sayfaları tara (Playwright entegreli) ===
         print("=== AŞAMA 1: Yeni filmler taranıyor ===")
         bos_sayfa = 0
-        for page_num in range(1, 20):  # Günlük tarama için ilk 20 sayfa yeterlidir
-            filmler = sayfa_filmlerini_cek(page_num)
+        for page_num in range(1, 20):
+            filmler = await sayfa_filmlerini_cek_pw(context, page_num)
             if filmler is None:
                 bos_sayfa += 1
                 if bos_sayfa >= 3:
@@ -196,7 +190,6 @@ async def main():
                     print(f"  {durum} {film['title']}")
                     return film
 
-            # Sitenin korumaya geçmemesi için 30'arlı gruplar halinde diske yazıyoruz
             for i in range(0, len(bos_filmler), 30):
                 grup = bos_filmler[i:i+30]
                 await asyncio.gather(*[isle(f) for f in grup])
