@@ -4,7 +4,7 @@ import os
 import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth
+from playwright_stealth import stealth_async
 
 if not os.path.exists('data'):
     os.makedirs('data')
@@ -48,7 +48,10 @@ def kesin_kaydet(filmler_dict):
 async def sayfa_filmlerini_cek_pw(context, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     page = await context.new_page()
-    await stealth(page)  # Hata veren kısım düzeltildi
+    
+    # Korumaları aşmak için stealth_async fonksiyonunu uyguluyoruz
+    await stealth_async(page)
+    
     try:
         response = await page.goto(url, timeout=30000, wait_until='networkidle')
         if not response or response.status != 200:
@@ -83,7 +86,9 @@ async def sayfa_filmlerini_cek_pw(context, page_num):
 async def rapid_link_cek(context, film_url, deneme=2):
     for attempt in range(deneme):
         page = await context.new_page()
-        await stealth(page)  # Hata veren kısım düzeltildi
+        
+        # Her yeni sayfada stealth modunu aktif ediyoruz
+        await stealth_async(page)
         
         try:
             caught_url = []
