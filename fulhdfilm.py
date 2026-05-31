@@ -11,16 +11,18 @@ if not os.path.exists('data'):
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 3  # Tünel kullanıldığı için paralellik miktarını güvenle artırabiliriz
+PARALEL = 3
 
-# Cloudflare Korumasını Aşmak İçin Kullanılan Güvenli API Köprüsü
-CLOUD_BYPASS_API = "https://api.allorigins.win/get?url="
+# Yedekli Proxy Köprüleri (Allorigins yoğunsa diğeri devreye girer)
+PROXIES = [
+    "https://api.allorigins.win/get?url=",
+    "https://api.codetabs.com/v1/proxy/?quest="
+]
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 }
 
-# Genişletilmiş ve optimize edilmiş oynatıcı kalıpları
 PLAYER_PATTERNS = [
     r'https?://(?:www\.)?rapidvid\.net/[^\s"\'<>]+',
     r'https?://cdn\.imgz\.me/[^\s"\'<>]+',
@@ -43,26 +45,60 @@ def kaydet(filmler_dict):
     with open(SONUC_DOSYA, 'w', encoding='utf-8') as f:
         json.dump(list(filmler_dict.values()), f, ensure_ascii=False, indent=2)
 
+def unpack_javascript(packed_code):
+    """ Dean Edwards Packer ile şifrelenmiş JS kodlarını çözer """
+    try:
+        payload_match = re.search(r"}\s*\('(.*)',\s*(\d+),\s*(\d+),\s*'(.*)'\.split", packed_code)
+        if not payload_match:
+            return packed_code
+        
+        p, a, c, k = payload_match.groups()
+        a, c = int(a), int(c)
+        k = k.split('|')
+        
+        def baseN(num, b):
+            return "0" if num == 0 else baseN(num // b, b).lstrip("0") + "0123456789abcdefghijklmnopqrstuvwxyz"[num % b]
+            
+        symtab = {}
+        for i in range(c):
+            symtab[baseN(i, a) if i >= a else str(i)] = k[i] or baseN(i, a)
+            
+        re_word = re.compile(r'\b\w+\b')
+        unpacked = re_word.sub(lambda m: symtab.get(m.group(0), m.group(0)), p)
+        return unpacked
+    except Exception:
+        return packed_code
+
+async def fetch_with_fallback(page, target_url):
+    """ Sırayla proxy havuzunu deneyerek içeriği çeker """
+    encoded_url = urllib.parse.quote_plus(target_url)
+    for proxy_base in PROXIES:
+        try:
+            bypass_url = f"{proxy_base}{encoded_url}"
+            response = await page.goto(bypass_url, timeout=20000)
+            if response and response.status == 200:
+                raw_text = await page.locator("body").inner_text()
+                # Allorigins için JSON temizliği
+                if "allorigins" in proxy_base:
+                    data = json.loads(raw_text)
+                    return data.get("contents", "")
+                return raw_text
+        except Exception:
+            continue
+    return ""
+
 async def sayfa_filmlerini_cek_safe(browser, page_num):
     target_url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
-    encoded_url = urllib.parse.quote_plus(target_url)
-    bypass_url = f"{CLOUD_BYPASS_API}{encoded_url}"
-
     context = await browser.new_context(user_agent=HEADERS['User-Agent'])
     page = await context.new_page()
     
     try:
-        response = await page.goto(bypass_url, timeout=30000)
-        if not response or response.status != 200:
+        html_content = await fetch_with_fallback(page, target_url)
+        if not html_content:
             return None
             
-        raw_json = await page.locator("body").inner_text()
-        data = json.loads(raw_json)
-        html_content = data.get("contents", "")
-        
         soup = BeautifulSoup(html_content, 'html.parser')
         films = soup.find_all('li', class_='film')
-        
         if not films:
             return None
             
@@ -88,27 +124,20 @@ async def sayfa_filmlerini_cek_safe(browser, page_num):
         await context.close()
 
 async def rapid_link_cek_safe(browser, film_url, deneme=2):
-    # Film detay sayfasını da Cloudflare'e yakalanmamak için tünelden geçiriyoruz
-    encoded_url = urllib.parse.quote_plus(film_url)
-    bypass_url = f"{CLOUD_BYPASS_API}{encoded_url}"
-    
     context = await browser.new_context(user_agent=HEADERS['User-Agent'])
     page = await context.new_page()
     
     for attempt in range(deneme):
         try:
-            response = await page.goto(bypass_url, timeout=30000)
-            if not response or response.status != 200:
-                continue
-                
-            raw_json = await page.locator("body").inner_text()
-            data = json.loads(raw_json)
-            html_content = data.get("contents", "")
-            
+            html_content = await fetch_with_fallback(page, film_url)
             if not html_content:
                 continue
 
-            # 1. Yöntem: HTML içerisindeki iframe src veya data-src yapılarını BS4 ile tara
+            # Eğer js şifrelenmişse önce onu çözüyoruz
+            if "eval(function(p,a,c,k,e,d)" in html_content:
+                html_content = unpack_javascript(html_content)
+
+            # 1. Aşama: iframe elementlerini tara
             soup = BeautifulSoup(html_content, 'html.parser')
             iframes = soup.find_all('iframe')
             for iframe in iframes:
@@ -119,7 +148,7 @@ async def rapid_link_cek_safe(browser, film_url, deneme=2):
                         await context.close()
                         return src.strip()
 
-            # 2. Yöntem: HTML / JavaScript kod bloğunun tamamında regex taraması yap
+            # 2. Aşama: Kod bloğunun tamamını regex ile tara
             for pattern in PLAYER_PATTERNS:
                 match = re.search(pattern, html_content)
                 if match:
@@ -129,10 +158,11 @@ async def rapid_link_cek_safe(browser, film_url, deneme=2):
                         await context.close()
                         return url
                         
-            # 3. Yöntem: Alternatif JavaScript değişken kalıpları (file: "...", link: "...")
+            # 3. Aşama: Gizli JS değişkenlerini ayrıştır
             js_patterns = [
                 r'(?:file|src|source|url|link)\s*[=:]\s*["\'](\bhttps?://[^\s"\'<>]{10,})',
                 r'iframe\.src\s*=\s*["\']([^"\']+)',
+                r'player\.setSource\(["\']([^"\']+)'
             ]
             for jp in js_patterns:
                 match = re.search(jp, html_content)
@@ -145,7 +175,7 @@ async def rapid_link_cek_safe(browser, film_url, deneme=2):
 
         except Exception:
             if attempt < deneme - 1:
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
         finally:
             pass
             
@@ -170,7 +200,7 @@ async def main():
         bos_sayfa = 0
         for page_num in range(1, 15):
             filmler = await sayfa_filmlerini_cek_safe(browser, page_num)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1)
             
             if filmler is None:
                 bos_sayfa += 1
