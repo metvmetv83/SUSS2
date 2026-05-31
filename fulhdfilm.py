@@ -11,13 +11,12 @@ if not os.path.exists('data'):
 BASE = "https://www.fullhdfilmizlesene.life"
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36'}
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 2  # GitHub Actions üzerinde kararlılık ve engellenmeme için 2 idealdir
+PARALEL = 2  # GitHub Actions'ta kararlılık ve engellenmeme için 2 idealdir
 
-# Sitede kullanılan alternatif tüm video servisleri
 VALID_STREAM_PATTERNS = [
     r'https?://(?:www\.)?rapidvid\.net/(?:vod|embed|v)/[^\s"\'<>]+',
     r'https?://cdn\.imgz\.me/[^\s"\'<>]+',
-    r'https?://(?:www\.)?vidmoly\.(?:to|me|org|net)/[^\s"\'<>]+',
+    r'https?://(?:www\.)?vidmoly\.(?:to|me|org|net|vc)/[^\s"\'<>]+',
     r'https?://[^\s"\'<>]+\.(?:mp4|m3u8)(?:\?[^\s"\'<>]+)?'
 ]
 
@@ -29,7 +28,6 @@ def mevcut_filmleri_yukle():
                 cleaned_dict = {}
                 for film in filmler:
                     r_link = film.get('rapid_link', '')
-                    # Boş veya hatalı linkleri temizle
                     if not r_link or BASE in r_link or "youtube.com" in r_link or "youtu.be" in r_link or len(r_link) < 15:
                         film['rapid_link'] = ""
                     cleaned_dict[film['link']] = film
@@ -39,7 +37,6 @@ def mevcut_filmleri_yukle():
     return {}
 
 def kesin_kaydet(filmler_dict):
-    """ Veriyi anında diske yazar ve işletim sistemi önbelleğini boşaltır """
     try:
         with open(SONUC_DOSYA, 'w', encoding='utf-8') as f:
             json.dump(list(filmler_dict.values()), f, ensure_ascii=False, indent=2)
@@ -90,7 +87,7 @@ async def rapid_link_cek(context, film_url, deneme=2):
     for attempt in range(deneme):
         page = await context.new_page()
         try:
-            # Medya/Resim yüklerini engelle, script akışına izin ver
+            # Medya yüklerini engelle, script akışına izin ver
             await page.route("**/*", lambda route: route.abort()
                 if route.request.resource_type in ["image", "font", "stylesheet", "media"]
                 else route.continue_()
@@ -108,42 +105,63 @@ async def rapid_link_cek(context, film_url, deneme=2):
 
             page.on("request", on_request)
 
-            # Sayfaya git ve DOM'un oturmasını bekle
+            # Sayfaya git ve DOM'un yüklenmesini bekle
             await page.goto(film_url, timeout=25000, wait_until='domcontentloaded')
             await page.wait_for_timeout(2000)
 
-            # 1. Aşama: Sayfa yüklendiği an ağ isteklerine düşmüş mü kontrol et
+            # 1. Aşama: Sayfa ilk açıldığında link ağ trafiğine düştü mü?
             if caught_url:
                 await page.close()
                 return caught_url[0].strip()
 
-            # 2. Aşama: Sitenin "Dublaj / Türkçe Altyazılı" sekme butonlarına sırayla TIKLA
-            # Bu işlem arkadaki gizli player kaynaklarını tetikler
-            player_buttons = [
+            # 2. Aşama: Kritik "Tek Tıklama" Simülasyonu
+            # Önce video kutusunun (player box) tam ortasına tek tıklama yaparak oynatıcıyı aktifleştiriyoruz
+            player_boxes = ['#plx', '.player-box', '#player', '.video-container', '.embed-responsive']
+            for box in player_boxes:
+                try:
+                    el = await page.query_selector(box)
+                    if el:
+                        # Element görünür olana kadar bekle ve tam merkezine TEK TIK yap
+                        await el.scroll_into_view_if_needed()
+                        await el.click(timeout=2000, force=True)
+                        await page.wait_for_timeout(1500)
+                        if caught_url:
+                            await page.close()
+                            return caught_url[0].strip()
+                        break
+                except:
+                    continue
+
+            # 3. Aşama: Dil / Alternatif sekmelerine TEK TIKLAMA Uygulama
+            # Sitenin güncellenen tüm muhtemel buton seçicileri listelendi
+            tab_selectors = [
                 '#dil-secenekleri kalip', 
                 '.player-tabs a', 
                 '.idSec a', 
                 'li[data-source]',
-                '.video-alternatives button'
+                '.video-alternatives button',
+                '.source-list li',
+                '.player-nav ul li'
             ]
             
-            for selector in player_buttons:
+            for selector in tab_selectors:
                 try:
                     buttons = await page.query_selector_all(selector)
-                    for btn in buttons[:3]:  # İlk 3 alternatifi dene (Hız için)
-                        await btn.click(timeout=1500)
-                        await page.wait_for_timeout(1000)
-                        if caught_url:
-                            await page.close()
-                            return caught_url[0].strip()
+                    for btn in buttons:
+                        if await btn.is_visible():
+                            await btn.click(timeout=1500, force=True)
+                            await page.wait_for_timeout(1200)
+                            if caught_url:
+                                await page.close()
+                                return caught_url[0].strip()
                 except:
                     continue
 
-            # 3. Aşama: Sayfa Kaynağı (HTML) Üzerinde Derin Regex ve ID Avı
+            # 4. Aşama: Sayfa Kaynağından Gelişmiş Regex & ID Ayıklama
             content = await page.content()
-            
-            # iframe kaynaklarını tara
             soup = BeautifulSoup(content, 'html.parser')
+            
+            # iframe elementlerini doğrudan kontrol et
             for iframe in soup.find_all('iframe'):
                 src = iframe.get('data-src') or iframe.get('src') or ''
                 if any(domain in src for domain in ["rapidvid", "vidmoly", "imgz"]):
@@ -151,7 +169,7 @@ async def rapid_link_cek(context, film_url, deneme=2):
                         await page.close()
                         return src.strip()
 
-            # Gizli script verilerinden ID yakalama
+            # Gizli script değişkenlerini tara
             js_patterns = [
                 r'data-id=["\'](\d+)["\']',
                 r'["\']?id["\']?\s*:\s*["\'](\d+)["\']',
@@ -203,7 +221,7 @@ async def main():
         # === AŞAMA 1: Yeni Sayfaları Tara ===
         print("=== AŞAMA 1: Yeni filmler taranıyor ===")
         bos_sayfa = 0
-        for page_num in range(1, 10):  # GitHub Actions'ta çok uzun sürmemesi için ideal aralık
+        for page_num in range(1, 10):
             filmler = await sayfa_filmlerini_cek_pw(context, page_num)
             if filmler is None:
                 bos_sayfa += 1
@@ -235,18 +253,16 @@ async def main():
                     if link:
                         film['rapid_link'] = link
                         filmler_dict[film['link']] = film
-                        # ÖNEMLİ: Bulunduğu saniye diske zorla kaydet
                         kesin_kaydet(filmler_dict)
                         print(f"  ✓ BAŞARILI: {film['title']} -> {link}")
                     else:
                         print(f"  ✗ BULUNAMADI: {film['title']}")
                     return film
 
-            # 10'arlı küçük güvenli paketler halinde koştur
             for i in range(0, len(bos_filmler), 10):
                 grup = bos_filmler[i:i+10]
                 await asyncio.gather(*[isle(f) for f in grup])
-                await asyncio.sleep(1)
+                await asyncio.sleep(1.5)
 
         await browser.close()
 
