@@ -10,7 +10,7 @@ if not os.path.exists('data'):
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 3
+PARALEL = 2  # GitHub Actions'ta Cloudflare engeline takılmamak için en ideal kararlı hızdır
 
 STREAM_DOMAINS = [
     "rapidvid", "vidmoly", "imgz.me", "doodstream",
@@ -98,20 +98,14 @@ async def yeni_sayfa(context, engelle_media=True):
 # ─── JS: Tüm data-* attribute'larını ve script içlerini topla ─────────────────
 JS_TOPLAMA = """() => {
     const out = [];
-
-    // Tüm elementlerdeki data-* attribute'ları
     document.querySelectorAll('*').forEach(el => {
         for (const attr of el.attributes) {
             if (attr.value && attr.value.startsWith('http')) out.push(attr.value);
         }
     });
-
-    // Script tag içerikleri
     document.querySelectorAll('script:not([src])').forEach(s => {
         if (s.innerText) out.push(s.innerText);
     });
-
-    // window değişkenleri
     for (const k of Object.keys(window)) {
         try {
             const v = window[k];
@@ -121,7 +115,6 @@ JS_TOPLAMA = """() => {
             }
         } catch(e) {}
     }
-
     return out.join('\\n');
 }"""
 
@@ -171,7 +164,6 @@ async def rapid_link_cek(context, film_url, deneme=3):
         try:
             await page.goto(film_url, timeout=40000, wait_until='domcontentloaded')
 
-            # CF challenge bekle
             try:
                 await page.wait_for_function(
                     "() => !document.title.includes('Just a moment')",
@@ -191,116 +183,69 @@ async def rapid_link_cek(context, film_url, deneme=3):
             found = html_stream_ara(content)
             if found: return found
 
-            # 2. networkidle — lazy-load için kritik
-            try:
-                await page.wait_for_load_state('networkidle', timeout=10000)
-            except Exception:
-                pass
-            await page.wait_for_timeout(1000)
+            # 2. networkidle bekleyişi
+            try: await page.wait_for_load_state('networkidle', timeout=8000)
+            except: pass
             if caught: return caught[0].strip()
 
-            # 3. JS ile toplu data toplama (BeautifulSoup'un kaçırdıklarını yakala)
+            # 3. JS ile toplu data toplama
             try:
                 js_dump = await page.evaluate(JS_TOPLAMA)
                 found = html_stream_ara(js_dump)
                 if found: return found
-            except Exception:
-                pass
+            except: pass
 
-            # 4. Player'a scroll + JS click simülasyonu
+            # 4. Player'a tek temiz klik simülasyonu (Double-click bug'ını önler)
             player_sels = ['#plx', '.player-box', '#player', '.video-player',
                            '.film-player', '.izle-player', '.embed-responsive',
-                           '[class*="player"]', '[id*="player"]', 'video']
+                           '[class*="player"]', '[id*="player"]']
             for sel in player_sels:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
                         await el.scroll_into_view_if_needed()
                         await page.wait_for_timeout(500)
-                        # Hem normal click hem JS click dene
-                        try: await el.click(timeout=3000, force=True)
-                        except Exception: pass
-                        try:
-                            await page.evaluate("(el) => { el.click(); el.dispatchEvent(new MouseEvent('click', {bubbles:true})); }", el)
-                        except Exception: pass
-                        await page.wait_for_timeout(3000)
+                        
+                        # force=True ile reklam perdesi arkasındaki asıl video alanına TEK TIKLAMA atılır
+                        await el.click(timeout=3000, force=True)
+                        await page.wait_for_timeout(2500)
+                        
                         if caught: return caught[0].strip()
-                        found = html_stream_ara(await page.content())
-                        if found: return found
-                        try:
-                            js_dump = await page.evaluate(JS_TOPLAMA)
-                            found = html_stream_ara(js_dump)
-                            if found: return found
-                        except Exception: pass
                         break
                 except Exception:
                     continue
 
-            # 5. Kaynak / dil tablarına tıkla
+            # 5. Kaynak / dil tablarına sırayla TEK TIKLAMA Uygulama
             tab_sels = ['.player-tabs a', '.player-tabs button',
                         '.idSec a', '.idSec button',
-                        'li[data-source]', 'li[data-id]', 'li[data-video]',
+                        'li[data-source]', 'li[data-id]',
                         '.source-list li', '.source-list a',
-                        '[data-video]', '[data-link]', '#kaynaklar a',
-                        '.dil-tab a', '.tab-link', 'a[href*="rapidvid"]',
-                        'a[href*="vidmoly"]', 'a[href*="doodstream"]']
+                        '#kaynaklar a', '.dil-tab a']
             for sel in tab_sels:
                 try:
-                    for btn in await page.query_selector_all(sel):
+                    buttons = await page.query_selector_all(sel)
+                    for btn in buttons:
                         if await btn.is_visible():
-                            try: await btn.click(timeout=2000, force=True)
-                            except Exception: pass
-                            await page.wait_for_timeout(2500)
+                            await btn.click(timeout=2000, force=True)
+                            await page.wait_for_timeout(2000)
                             if caught: return caught[0].strip()
+                            
                             found = html_stream_ara(await page.content())
                             if found: return found
                 except Exception:
                     continue
 
-            # 6. Sayfadaki iframe URL'lerini topla + her birini ayrıca ziyaret et
-            iframe_urls = []
-            try:
-                iframe_urls = await page.evaluate("""() =>
-                    [...document.querySelectorAll('iframe')].map(f =>
-                        f.getAttribute('data-src') || f.getAttribute('src') || ''
-                    ).filter(s => s.startsWith('http'))
-                """)
-            except Exception:
-                pass
-
-            # Çalışan frame'lere bak
+            # 6. Derin iFrame ve sub-frame taraması
             for frame in page.frames:
                 if frame == page.main_frame: continue
                 try:
                     furl = frame.url
-                    if furl and furl not in iframe_urls: iframe_urls.append(furl)
                     if furl and any(d in furl for d in STREAM_DOMAINS) and url_gecerli_mi(furl):
                         return furl.strip()
                     found = html_stream_ara(await frame.content())
                     if found: return found
                 except Exception:
                     continue
-
-            # iframe URL'lerini ayrı sayfada aç
-            for iframe_url in iframe_urls:
-                if not iframe_url or not iframe_url.startswith('http'): continue
-                if BASE in iframe_url or "youtube" in iframe_url: continue
-                if any(d in iframe_url for d in STREAM_DOMAINS) and url_gecerli_mi(iframe_url):
-                    return iframe_url.strip()
-                # İframe sayfasını yeni tab'da aç ve içini tara
-                try:
-                    sub = await yeni_sayfa(context, engelle_media=False)
-                    sub.on("request",  lambda r: caught.append(r.url) if stream_url_mi(r.url) else None)
-                    sub.on("response", lambda r: (caught.append(r.url) if stream_url_mi(r.url) and r.url not in caught else None))
-                    await sub.goto(iframe_url, timeout=20000, wait_until='domcontentloaded')
-                    await sub.wait_for_timeout(3000)
-                    if caught: await sub.close(); return caught[0].strip()
-                    found = html_stream_ara(await sub.content())
-                    await sub.close()
-                    if found: return found
-                except Exception:
-                    try: await sub.close()
-                    except Exception: pass
 
         except Exception as e:
             print(f"    ⚠️ Deneme {attempt+1}: {e}")
