@@ -4,7 +4,7 @@ import os
 import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth
 
 if not os.path.exists('data'):
     os.makedirs('data')
@@ -48,7 +48,7 @@ def kesin_kaydet(filmler_dict):
 async def sayfa_filmlerini_cek_pw(context, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     page = await context.new_page()
-    await stealth_async(page)  # Bot korumasını bu sayfa için de devre dışı bırakıyoruz
+    await stealth(page)  # Hata veren kısım düzeltildi
     try:
         response = await page.goto(url, timeout=30000, wait_until='networkidle')
         if not response or response.status != 200:
@@ -83,11 +83,9 @@ async def sayfa_filmlerini_cek_pw(context, page_num):
 async def rapid_link_cek(context, film_url, deneme=2):
     for attempt in range(deneme):
         page = await context.new_page()
-        # Kritik Adım: Sayfayı tamamen görünmez/insansı moda sokuyoruz
-        await stealth_async(page)
+        await stealth(page)  # Hata veren kısım düzeltildi
         
         try:
-            # Dinamik Gelişmiş Ağ İstek İzleyicisi
             caught_url = []
             def on_request(req):
                 url = req.url
@@ -99,7 +97,6 @@ async def rapid_link_cek(context, film_url, deneme=2):
 
             page.on("request", on_request)
 
-            # Sayfaya git ve ağ istekleri tamamen durulana kadar bekle (Korumayı aşmak için mühim)
             await page.goto(film_url, timeout=35000, wait_until='networkidle')
             await page.wait_for_timeout(3000)
 
@@ -107,7 +104,6 @@ async def rapid_link_cek(context, film_url, deneme=2):
                 await page.close()
                 return caught_url[0].strip()
 
-            # Oyuncu Kutusunun Merkezine Tek Tıklama
             player_boxes = ['#plx', '.player-box', '#player', '.video-container', '.embed-responsive']
             for box in player_boxes:
                 try:
@@ -123,7 +119,6 @@ async def rapid_link_cek(context, film_url, deneme=2):
                 except:
                     continue
 
-            # Dil Alternatif Butonlarına Tek Tıklama (Dublaj / Altyazı)
             tab_selectors = [
                 '#dil-secenekleri kalip', 
                 '.player-tabs a', 
@@ -146,7 +141,6 @@ async def rapid_link_cek(context, film_url, deneme=2):
                 except:
                     continue
 
-            # HTML Kodundan Derin Ayıklama (Yedek Plan)
             content = await page.content()
             soup = BeautifulSoup(content, 'html.parser')
             for iframe in soup.find_all('iframe'):
@@ -172,7 +166,6 @@ async def main():
     print(f"  → {dolu} geçerli link korundu, {len(bos_filmler)} boş/hatalı link taranacak.\n")
 
     async with async_playwright() as p:
-        # Gerçek bir Windows tarayıcısı gibi davranmasını sağlayacak parametreler
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -184,7 +177,6 @@ async def main():
             ]
         )
         
-        # Gerçekçi tarayıcı bağlamı (Türkçe dil desteği ve gerçek ekran boyutları simülasyonu)
         context = await browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36',
             viewport={'width': 1920, 'height': 1080},
@@ -214,7 +206,6 @@ async def main():
             else:
                 print(f"Sayfa {page_num}: Yeni film yok.")
 
-        # === AŞAMA 2: Link Arama ===
         bos_filmler = [f for f in filmler_dict.values() if not f.get('rapid_link')]
         if bos_filmler:
             print(f"\n=== AŞAMA 2: {len(bos_filmler)} film için linkler çıkarılıyor ===\n")
@@ -233,7 +224,6 @@ async def main():
                         print(f"  ✗ BULUNAMADI: {film['title']}")
                     return film
 
-            # Sırayla ve sunucuyu yormadan, ban yemeden akış yönetimi
             for i in range(0, len(bos_filmler), 5):
                 grup = bos_filmler[i:i+5]
                 await asyncio.gather(*[isle(f) for f in grup])
