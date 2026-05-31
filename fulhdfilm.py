@@ -10,7 +10,7 @@ if not os.path.exists('data'):
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 2  # Sunucu IP'sinin ban yememesi için en güvenli paralel akış hızı
+PARALEL = 1  # Cloudflare WAF tetiklenmemesi için Actions üzerinde tekli kararlı akış şarttır
 
 STREAM_DOMAINS = [
     "rapidvid", "vidmoly", "imgz.me", "doodstream",
@@ -50,7 +50,6 @@ def stream_url_mi(url):
     return any(re.search(p, url, re.IGNORECASE) for p in VALID_STREAM_PATTERNS)
 
 def html_stream_ara(html):
-    """HTML metninden stream URL çıkar."""
     for pat in VALID_STREAM_PATTERNS:
         for m in re.findall(pat, html, re.IGNORECASE):
             if url_gecerli_mi(m): return m.strip()
@@ -88,10 +87,8 @@ def kesin_kaydet(filmler_dict):
 async def yeni_sayfa(context):
     page = await context.new_page()
     await page.add_init_script(STEALTH_SCRIPT)
-    # Cloudflare doğrulamalarının kırılmaması için CSS ve JS dosyalarının yüklenmesine tam izin veriyoruz
     return page
 
-# ─── JS: Tüm data-* attribute'larını ve script içlerini topla ─────────────────
 JS_TOPLAMA = """() => {
     const out = [];
     document.querySelectorAll('*').forEach(el => {
@@ -119,17 +116,22 @@ async def sayfa_filmlerini_cek(context, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     page = await yeni_sayfa(context)
     try:
-        # Korumayı temiz geçmek için ağ yükünün hafiflemesini bekliyoruz
-        r = await page.goto(url, timeout=45000, wait_until='networkidle')
-        await page.wait_for_timeout(3000)
+        # wait_until='commit' ile Cloudflare bloklamadan DOM ağacına sızıyoruz
+        await page.goto(url, timeout=60000, wait_until='commit')
+        # JS meydan okumasının (Challenge) çözülmesi için insansı esnek bekleme süresi
+        await asyncio.sleep(7)
         
         content = await page.content()
-        if "Just a moment" in content or not r or r.status not in [200, 304]: 
-            return None
-            
+        if "Just a moment" in content or "Cloudflare" in content:
+            # Eğer hala aşamadıysa mouse hareketi simüle edip biraz daha bekliyoruz
+            await page.mouse.move(100, 100)
+            await asyncio.sleep(5)
+            content = await page.content()
+
         soup = BeautifulSoup(content, 'html.parser')
         films = soup.find_all('li', class_='film')
         if not films: return None
+        
         filmler = []
         for film in films:
             title = film.find('span', class_='film-title')
@@ -160,23 +162,16 @@ async def rapid_link_cek(context, film_url, deneme=3):
         page.on("response", lambda r: (caught.append(r.url) if stream_url_mi(r.url) and r.url not in caught else None))
 
         try:
-            await page.goto(film_url, timeout=45000, wait_until='networkidle')
-
-            # Sayfa başlığında Challenge olup olmadığını denetle
-            try:
-                await page.wait_for_function(
-                    "() => !document.title.includes('Just a moment')",
-                    timeout=15000
-                )
-            except Exception:
-                pass
-
-            await page.wait_for_timeout(4000)
-            if caught: return caught[0].strip()
+            await page.goto(film_url, timeout=60000, wait_until='commit')
+            await asyncio.sleep(8)
 
             content = await page.content()
             if "Just a moment" in content:
-                await asyncio.sleep(5); continue
+                await page.mouse.move(200, 200)
+                await asyncio.sleep(6)
+                content = await page.content()
+
+            if caught: return caught[0].strip()
 
             # 1. HTML doğrudan tara
             found = html_stream_ara(content)
@@ -189,38 +184,32 @@ async def rapid_link_cek(context, film_url, deneme=3):
                 if found: return found
             except: pass
 
-            # 3. Player'a tek temiz klik simülasyonu
+            # 3. Player alanına insansı tık simülasyonu
             player_sels = ['#plx', '.player-box', '#player', '.video-player',
-                           '.film-player', '.izle-player', '.embed-responsive',
-                           '[class*="player"]', '[id*="player"]']
+                           '.film-player', '.izle-player', '.embed-responsive']
             for sel in player_sels:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
                         await el.scroll_into_view_if_needed()
-                        await page.wait_for_timeout(500)
+                        await asyncio.sleep(1)
                         await el.click(timeout=3000, force=True)
-                        await page.wait_for_timeout(3000)
+                        await asyncio.sleep(4)
                         if caught: return caught[0].strip()
                         break
                 except Exception:
                     continue
 
-            # 4. Kaynak / dil tablarına sırayla Tıklama
-            tab_sels = ['.player-tabs a', '.player-tabs button',
-                        '.idSec a', '.idSec button',
-                        'li[data-source]', 'li[data-id]',
-                        '.source-list li', '.source-list a',
-                        '#kaynaklar a', '.dil-tab a']
+            # 4. Alternatif kaynak tabları
+            tab_sels = ['.player-tabs a', '.player-tabs button', '.idSec a', 'li[data-source]', '.source-list li']
             for sel in tab_sels:
                 try:
                     buttons = await page.query_selector_all(sel)
                     for btn in buttons:
                         if await btn.is_visible():
                             await btn.click(timeout=2000, force=True)
-                            await page.wait_for_timeout(2000)
+                            await asyncio.sleep(3)
                             if caught: return caught[0].strip()
-                            
                             found = html_stream_ara(await page.content())
                             if found: return found
                 except Exception:
@@ -256,31 +245,42 @@ async def main():
     print(f"  → {dolu} geçerli link korundu, {len(bos)} link taranacak.\n")
 
     async with async_playwright() as p:
+        # Cloudflare'in headless algılayıcılarını kör eden gelişmiş Chromium argümanları
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                '--no-sandbox', '--disable-dev-shm-usage', '--mute-audio',
+                '--no-sandbox', 
+                '--disable-dev-shm-usage', 
+                '--mute-audio',
                 '--disable-blink-features=AutomationControlled',
-                '--window-size=1920,1080', '--disable-web-security',
-                '--allow-running-insecure-content', '--lang=tr-TR',
+                '--window-size=1920,1080', 
+                '--disable-web-security',
+                '--allow-running-insecure-content', 
+                '--lang=tr-TR',
                 '--disable-features=IsolateOrigins,site-per-process',
+                '--use-gl=desktop',
+                '--no-first-run',
+                '--password-store=basic'
             ]
         )
         context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             viewport={'width': 1920, 'height': 1080},
             locale='tr-TR', timezone_id='Europe/Istanbul',
             java_script_enabled=True, bypass_csp=True,
             ignore_https_errors=True,
             extra_http_headers={
-                "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
-                "Sec-Ch-Ua": '"Chromium";v="124","Google Chrome";v="124"',
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Cache-Control": "max-age=0",
+                "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"Windows"',
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
                 "Sec-Fetch-Site": "none",
                 "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1"
             }
         )
 
@@ -291,14 +291,15 @@ async def main():
             filmler = await sayfa_filmlerini_cek(context, page_num)
             if filmler is None:
                 bos_sayfa += 1
-                print(f"Sayfa {page_num}: Erişilemedi.")
+                print(f"Sayfa {page_num}: Erişilemedi veya içerik boş dönüyor.")
                 if bos_sayfa >= 3: break
                 continue
             bos_sayfa = 0
             yeni = [f for f in filmler if f['link'] not in filmler_dict]
             for f in yeni: filmler_dict[f['link']] = f
-            print(f"Sayfa {page_num}: {len(filmler)} film, {len(yeni)} yeni.")
+            print(f"Sayfa {page_num}: {len(filmler)} film bulundu, {len(yeni)} yeni eklendi.")
             if yeni: kesin_kaydet(filmler_dict)
+            await asyncio.sleep(2)
 
         # AŞAMA 2
         bos = [f for f in filmler_dict.values() if not f.get('rapid_link')]
@@ -320,13 +321,13 @@ async def main():
                     else:
                         print(f"  ✗ [{islenen}/{len(bos)}] {film['title']}")
 
-            for i in range(0, len(bos), 30):
-                grup = bos[i:i+30]
+            for i in range(0, len(bos), 15):
+                grup = bos[i:i+15]
                 await asyncio.gather(*[isle(f) for f in grup])
                 kesin_kaydet(filmler_dict)
                 dolu_s = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
-                print(f"\n💾 Kaydedildi — {islenen}/{len(bos)} işlendi, {dolu_s} link hazır\n")
-                await asyncio.sleep(2)
+                print(f"\n💾 Veritabanı Güncellendi — {islenen}/{len(bos)} tamamlandı, {dolu_s} link hazır.\n")
+                await asyncio.sleep(3)
 
         await browser.close()
 
@@ -334,9 +335,9 @@ async def main():
     dolu_s = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
     print(f"\n{'='*50}")
     if top > 0:
-        print(f"✓ Tamamlandı. Toplam: {top} | Link: {dolu_s} ({dolu_s/top*100:.1f}%) | Eksik: {top-dolu_s}")
+        print(f"✓ İşlem Tamamlandı. Toplam Veri: {top} | Çözülen Link: {dolu_s} ({dolu_s/top*100:.1f}%) | Eksik: {top-dolu_s}")
     else:
-        print("✗ Hiç film çekilemedi.")
+        print("✗ Sitenin Cloudflare koruması bu sunucu IP'sinden geçilemedi.")
     print('='*50)
 
 if __name__ == "__main__":
