@@ -3,6 +3,7 @@ import json
 import os
 import re
 import urllib.parse
+import random
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
@@ -11,12 +12,13 @@ if not os.path.exists('data'):
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 3
+PARALEL = 2  # Rate-limit (engelleme) yememek için paralelliği 2'de sabitlemek en güvenlisidir
 
-# Yedekli Proxy Köprüleri (Allorigins yoğunsa diğeri devreye girer)
+# Genişletilmiş ve Optimize Edilmiş Proxy Köprüleri
 PROXIES = [
     "https://api.allorigins.win/get?url=",
-    "https://api.codetabs.com/v1/proxy/?quest="
+    "https://api.codetabs.com/v1/proxy/?quest=",
+    "https://corsproxy.io/?"
 ]
 
 HEADERS = {
@@ -46,7 +48,6 @@ def kaydet(filmler_dict):
         json.dump(list(filmler_dict.values()), f, ensure_ascii=False, indent=2)
 
 def unpack_javascript(packed_code):
-    """ Dean Edwards Packer ile şifrelenmiş JS kodlarını çözer """
     try:
         payload_match = re.search(r"}\s*\('(.*)',\s*(\d+),\s*(\d+),\s*'(.*)'\.split", packed_code)
         if not payload_match:
@@ -70,20 +71,33 @@ def unpack_javascript(packed_code):
         return packed_code
 
 async def fetch_with_fallback(page, target_url):
-    """ Sırayla proxy havuzunu deneyerek içeriği çeker """
+    # Her istekte proxy sırasını karıştırarak yükü dağıtıyoruz
+    shuffled_proxies = PROXIES.copy()
+    random.shuffle(shuffled_proxies)
+    
     encoded_url = urllib.parse.quote_plus(target_url)
-    for proxy_base in PROXIES:
+    for proxy_base in shuffled_proxies:
         try:
-            bypass_url = f"{proxy_base}{encoded_url}"
-            response = await page.goto(bypass_url, timeout=20000)
+            # corsproxy.io encode edilmemiş ham URL isteyebilir, kontrol ediyoruz
+            if "corsproxy.io" in proxy_base:
+                bypass_url = f"{proxy_base}{target_url}"
+            else:
+                bypass_url = f"{proxy_base}{encoded_url}"
+                
+            response = await page.goto(bypass_url, timeout=25000)
             if response and response.status == 200:
                 raw_text = await page.locator("body").inner_text()
-                # Allorigins için JSON temizliği
+                
+                # Eğer Allorigins kullanıldıysa JSON objesinden temizle
                 if "allorigins" in proxy_base:
-                    data = json.loads(raw_text)
-                    return data.get("contents", "")
+                    try:
+                        data = json.loads(raw_text)
+                        return data.get("contents", "")
+                    except:
+                        pass
                 return raw_text
         except Exception:
+            await asyncio.sleep(1) # Köprü geçişlerinde kısa es
             continue
     return ""
 
@@ -130,14 +144,13 @@ async def rapid_link_cek_safe(browser, film_url, deneme=2):
     for attempt in range(deneme):
         try:
             html_content = await fetch_with_fallback(page, film_url)
-            if not html_content:
+            if not html_content or len(html_content) < 200:
                 continue
 
-            # Eğer js şifrelenmişse önce onu çözüyoruz
             if "eval(function(p,a,c,k,e,d)" in html_content:
                 html_content = unpack_javascript(html_content)
 
-            # 1. Aşama: iframe elementlerini tara
+            # 1. Aşama: iframe kontrolü
             soup = BeautifulSoup(html_content, 'html.parser')
             iframes = soup.find_all('iframe')
             for iframe in iframes:
@@ -148,7 +161,7 @@ async def rapid_link_cek_safe(browser, film_url, deneme=2):
                         await context.close()
                         return src.strip()
 
-            # 2. Aşama: Kod bloğunun tamamını regex ile tara
+            # 2. Aşama: Regex düz metin kontrolü
             for pattern in PLAYER_PATTERNS:
                 match = re.search(pattern, html_content)
                 if match:
@@ -158,7 +171,7 @@ async def rapid_link_cek_safe(browser, film_url, deneme=2):
                         await context.close()
                         return url
                         
-            # 3. Aşama: Gizli JS değişkenlerini ayrıştır
+            # 3. Aşama: Gizli değişken kalıpları
             js_patterns = [
                 r'(?:file|src|source|url|link)\s*[=:]\s*["\'](\bhttps?://[^\s"\'<>]{10,})',
                 r'iframe\.src\s*=\s*["\']([^"\']+)',
@@ -175,7 +188,7 @@ async def rapid_link_cek_safe(browser, film_url, deneme=2):
 
         except Exception:
             if attempt < deneme - 1:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(2)
         finally:
             pass
             
@@ -200,7 +213,8 @@ async def main():
         bos_sayfa = 0
         for page_num in range(1, 15):
             filmler = await sayfa_filmlerini_cek_safe(browser, page_num)
-            await asyncio.sleep(1)
+            # Proxy sunucularını yormamak adına her sayfa arası akıllı bekleme
+            await asyncio.sleep(random.uniform(1.5, 2.5))
             
             if filmler is None:
                 bos_sayfa += 1
@@ -231,11 +245,13 @@ async def main():
                     film['rapid_link'] = link
                     durum = "✓" if link else "✗"
                     print(f"  {durum} {film['title']}")
+                    # Aşırı istek koruması (Rate limit önleyici mikro gecikme)
+                    await asyncio.sleep(random.uniform(0.6, 1.2))
                     return film
 
             islenen = 0
-            for i in range(0, len(bos_filmler), 30):
-                grup = bos_filmler[i:i+30]
+            for i in range(0, len(bos_filmler), 20):
+                grup = bos_filmler[i:i+20]
                 await asyncio.gather(*[isle(f) for f in grup])
                 
                 for f in grup:
@@ -245,7 +261,8 @@ async def main():
                 kaydet(filmler_dict)
                 dolu_sayisi = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
                 print(f"\n💾 Değişiklikler Diske Yazıldı — {islenen}/{len(bos_filmler)} film tarandı.\n")
-                await asyncio.sleep(2)
+                # Grup aralarında proxy IP havuzlarının rahatlaması için ana bekleme süresi
+                await asyncio.sleep(4)
 
         await browser.close()
 
