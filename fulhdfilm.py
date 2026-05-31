@@ -11,19 +11,21 @@ if not os.path.exists('data'):
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 2
+PARALEL = 3  # Tünel kullanıldığı için paralellik miktarını güvenle artırabiliriz
 
-# Cloudflare Duvarını Delmek İçin Evrensel Proxy Köprüsü URL'si
+# Cloudflare Korumasını Aşmak İçin Kullanılan Güvenli API Köprüsü
 CLOUD_BYPASS_API = "https://api.allorigins.win/get?url="
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 }
 
+# Genişletilmiş ve optimize edilmiş oynatıcı kalıpları
 PLAYER_PATTERNS = [
     r'https?://(?:www\.)?rapidvid\.net/[^\s"\'<>]+',
     r'https?://cdn\.imgz\.me/[^\s"\'<>]+',
-    r'https?://[^\s"\'<>]*(?:player|embed|watch|vod|stream)[^\s"\'<>]*',
+    r'https?://(?:www\.)?vidmoly\.to/embed-[^\s"\'<>]+',
+    r'https?://[^\s"\'<>]*(?:player|embed|watch|vod|stream)[^\s"\'<>]+',
     r'https?://(?:www\.)?(?:youtube\.com|youtu\.be)/(?:embed/|watch\?v=)[^\s"\'<>]+',
     r'https?://[^\s"\'<>]+\.(?:mp4|m3u8)[^\s"\'<>]*',
 ]
@@ -43,7 +45,6 @@ def kaydet(filmler_dict):
 
 async def sayfa_filmlerini_cek_safe(browser, page_num):
     target_url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
-    # URL'yi proxy köprüsünün anlayacağı şekilde encode ediyoruz
     encoded_url = urllib.parse.quote_plus(target_url)
     bypass_url = f"{CLOUD_BYPASS_API}{encoded_url}"
 
@@ -51,10 +52,8 @@ async def sayfa_filmlerini_cek_safe(browser, page_num):
     page = await context.new_page()
     
     try:
-        # API üzerinden içeriği güvenli bir şekilde çekiyoruz (Cloudflare tetiklenmez)
         response = await page.goto(bypass_url, timeout=30000)
         if not response or response.status != 200:
-            print(f"⚠️ Sayfa {page_num} köprü üzerinden alınamadı.")
             return None
             
         raw_json = await page.locator("body").inner_text()
@@ -82,69 +81,75 @@ async def sayfa_filmlerini_cek_safe(browser, page_num):
                     "rapid_link": ""
                 })
         return filmler
-    except Exception as e:
-        print(f"⚠️ Sayfa {page_num} işlenirken hata oluştu: {str(e)}")
+    except Exception:
         return None
     finally:
         await page.close()
         await context.close()
 
-async def rapid_link_cek(browser, film_url, deneme=2):
-    context = await browser.new_context(
-        user_agent=HEADERS['User-Agent'],
-        viewport={'width': 1280, 'height': 720}
-    )
+async def rapid_link_cek_safe(browser, film_url, deneme=2):
+    # Film detay sayfasını da Cloudflare'e yakalanmamak için tünelden geçiriyoruz
+    encoded_url = urllib.parse.quote_plus(film_url)
+    bypass_url = f"{CLOUD_BYPASS_API}{encoded_url}"
+    
+    context = await browser.new_context(user_agent=HEADERS['User-Agent'])
+    page = await context.new_page()
     
     for attempt in range(deneme):
-        page = await context.new_page()
         try:
-            # Sadece multimedya ağ akışını dinlemek için imajları engelle
-            await page.route("**/*", lambda route: route.abort()
-                if route.request.resource_type in ["image", "font"]
-                else route.continue_()
-            )
-
-            caught_url = []
-            def on_request(req):
-                url = req.url
-                for pattern in PLAYER_PATTERNS:
-                    if re.search(pattern, url):
-                        caught_url.append(url)
-                        break
-
-            page.on("request", on_request)
+            response = await page.goto(bypass_url, timeout=30000)
+            if not response or response.status != 200:
+                continue
+                
+            raw_json = await page.locator("body").inner_text()
+            data = json.loads(raw_json)
+            html_content = data.get("contents", "")
             
-            # Film detay sayfasında proxy yerine doğrudan Playwright izolasyonu deniyoruz
-            await page.goto(film_url, timeout=30000, wait_until='domcontentloaded')
-            await page.wait_for_timeout(4000)
+            if not html_content:
+                continue
 
-            if caught_url:
-                await page.close()
-                await context.close()
-                return caught_url[0]
-
-            # iframe DOM taraması
-            iframe_selectors = ['#plx iframe', '.player-box iframe', 'iframe[src*="rapid"]', 'iframe']
-            for selector in iframe_selectors:
-                try:
-                    src = await page.eval_on_selector(
-                        selector,
-                        'el => el.getAttribute("data-src") || el.getAttribute("src") || ""',
-                        timeout=2000
-                    )
-                    if src and src.startswith('http'):
+            # 1. Yöntem: HTML içerisindeki iframe src veya data-src yapılarını BS4 ile tara
+            soup = BeautifulSoup(html_content, 'html.parser')
+            iframes = soup.find_all('iframe')
+            for iframe in iframes:
+                src = iframe.get('data-src') or iframe.get('src') or ''
+                for pattern in PLAYER_PATTERNS:
+                    if re.search(pattern, src):
                         await page.close()
                         await context.close()
                         return src.strip()
-                except:
-                    continue
+
+            # 2. Yöntem: HTML / JavaScript kod bloğunun tamamında regex taraması yap
+            for pattern in PLAYER_PATTERNS:
+                match = re.search(pattern, html_content)
+                if match:
+                    url = match.group(0).rstrip('"\' ')
+                    if len(url) > 15:
+                        await page.close()
+                        await context.close()
+                        return url
                         
+            # 3. Yöntem: Alternatif JavaScript değişken kalıpları (file: "...", link: "...")
+            js_patterns = [
+                r'(?:file|src|source|url|link)\s*[=:]\s*["\'](\bhttps?://[^\s"\'<>]{10,})',
+                r'iframe\.src\s*=\s*["\']([^"\']+)',
+            ]
+            for jp in js_patterns:
+                match = re.search(jp, html_content)
+                if match:
+                    url = match.group(1).rstrip('"\' ')
+                    if url.startswith('http'):
+                        await page.close()
+                        await context.close()
+                        return url
+
         except Exception:
             if attempt < deneme - 1:
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
         finally:
-            await page.close()
+            pass
             
+    await page.close()
     await context.close()
     return ""
 
@@ -163,9 +168,9 @@ async def main():
 
         print("=== AŞAMA 1: Yeni filmler taranıyor ===")
         bos_sayfa = 0
-        for page_num in range(1, 15): # İlk tarama için ideal sayfa sayısı
+        for page_num in range(1, 15):
             filmler = await sayfa_filmlerini_cek_safe(browser, page_num)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
             
             if filmler is None:
                 bos_sayfa += 1
@@ -184,7 +189,7 @@ async def main():
             else:
                 print(f"Sayfa {page_num}: Yeni film yok, içerik güncel.")
 
-        # === AŞAMA 2: iframe Linklerini Ayrıştırma ===
+        # === AŞAMA 2: Boş olan rapid_link alanlarını doldur ===
         bos_filmler = [f for f in filmler_dict.values() if not f.get('rapid_link')]
         if bos_filmler:
             print(f"\n=== AŞAMA 2: {len(bos_filmler)} film için medya linkleri çözülüyor ===\n")
@@ -192,15 +197,15 @@ async def main():
 
             async def isle(film):
                 async with semaphore:
-                    link = await rapid_link_cek(browser, film['link'])
+                    link = await rapid_link_cek_safe(browser, film['link'])
                     film['rapid_link'] = link
                     durum = "✓" if link else "✗"
                     print(f"  {durum} {film['title']}")
                     return film
 
             islenen = 0
-            for i in range(0, len(bos_filmler), 20):
-                grup = bos_filmler[i:i+20]
+            for i in range(0, len(bos_filmler), 30):
+                grup = bos_filmler[i:i+30]
                 await asyncio.gather(*[isle(f) for f in grup])
                 
                 for f in grup:
@@ -210,7 +215,7 @@ async def main():
                 kaydet(filmler_dict)
                 dolu_sayisi = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
                 print(f"\n💾 Değişiklikler Diske Yazıldı — {islenen}/{len(bos_filmler)} film tarandı.\n")
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
 
         await browser.close()
 
