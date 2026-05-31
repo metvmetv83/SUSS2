@@ -10,7 +10,7 @@ if not os.path.exists('data'):
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 1  # Cloudflare WAF tetiklenmemesi için Actions üzerinde tekli kararlı akış şarttır
+PARALEL = 1  # GitHub Actions'ta Cloudflare WAF tetiklenmemesi için tekli kararlı akış
 
 STREAM_DOMAINS = [
     "rapidvid", "vidmoly", "imgz.me", "doodstream",
@@ -111,21 +111,19 @@ JS_TOPLAMA = """() => {
     return out.join('\\n');
 }"""
 
-# ─── AŞAMA 1 ──────────────────────────────────────────────────────────────────
+# ─── AŞAMA 1: SAYFA TARAMA (Geliştirilmiş HTML Seçici) ───────────────────────
 async def sayfa_filmlerini_cek(context, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     page = await yeni_sayfa(context)
     try:
-        # wait_until='commit' ile Cloudflare bloklamadan DOM ağacına sızıyoruz
+        # Sayfa ilk yanıtı aldığı an DOM kontrolünü devralıyoruz (Cloudflare turnstile kilitlemesini önler)
         await page.goto(url, timeout=60000, wait_until='commit')
-        # JS meydan okumasının (Challenge) çözülmesi için insansı esnek bekleme süresi
-        await asyncio.sleep(7)
+        await asyncio.sleep(8)
         
         content = await page.content()
         if "Just a moment" in content or "Cloudflare" in content:
-            # Eğer hala aşamadıysa mouse hareketi simüle edip biraz daha bekliyoruz
-            await page.mouse.move(100, 100)
-            await asyncio.sleep(5)
+            await page.mouse.move(150, 150)
+            await asyncio.sleep(6)
             content = await page.content()
 
         soup = BeautifulSoup(content, 'html.parser')
@@ -134,16 +132,31 @@ async def sayfa_filmlerini_cek(context, page_num):
         
         filmler = []
         for film in films:
-            title = film.find('span', class_='film-title')
+            title_tag = film.find('span', class_='film-title')
             link_tag = film.find('a', class_='tt')
-            if title and link_tag:
-                img = film.find('img')
+            
+            if title_tag and link_tag:
+                # Resim Seçici Optimizasyonu: Geçici SVG yerine asıl görsel linkini ayıklar
+                img_tag = film.find('img')
+                image_url = ""
+                if img_tag:
+                    potential_srcs = [
+                        img_tag.get('data-src'),
+                        img_tag.get('src'),
+                        img_tag.get('data-srcset'),
+                    ]
+                    # Data SVG olmayan ilk geçerli linki seç
+                    for src in potential_srcs:
+                        if src and "http" in src and not src.startswith("data:"):
+                            image_url = src.split()[0].strip() # x1, x1.5 gibi ibareleri temizle
+                            break
+
                 filmler.append({
-                    "title": title.text.strip(),
+                    "title": title_tag.text.strip(),
                     "link": link_tag['href'].rstrip('/'),
                     "imdb": (film.find('span', class_='imdb') or type('x',(),({"text":"0"}))()).text.strip(),
                     "year": (film.find('span', class_='film-yil') or type('x',(),({"text":""}))()).text.strip(),
-                    "image": (img.get('data-src') or img.get('src','')) if img else "",
+                    "image": image_url,
                     "rapid_link": ""
                 })
         return filmler or None
@@ -152,7 +165,7 @@ async def sayfa_filmlerini_cek(context, page_num):
     finally:
         await page.close()
 
-# ─── AŞAMA 2 ──────────────────────────────────────────────────────────────────
+# ─── AŞAMA 2: VİDEO TETİKLEME VE LİNK YAKALAMA ────────────────────────────────
 async def rapid_link_cek(context, film_url, deneme=3):
     for attempt in range(deneme):
         page = await yeni_sayfa(context)
@@ -167,7 +180,7 @@ async def rapid_link_cek(context, film_url, deneme=3):
 
             content = await page.content()
             if "Just a moment" in content:
-                await page.mouse.move(200, 200)
+                await page.mouse.move(250, 250)
                 await asyncio.sleep(6)
                 content = await page.content()
 
@@ -184,7 +197,7 @@ async def rapid_link_cek(context, film_url, deneme=3):
                 if found: return found
             except: pass
 
-            # 3. Player alanına insansı tık simülasyonu
+            # 3. Player alanına insansı TEK TIKLAMA simülasyonu
             player_sels = ['#plx', '.player-box', '#player', '.video-player',
                            '.film-player', '.izle-player', '.embed-responsive']
             for sel in player_sels:
@@ -236,7 +249,7 @@ async def rapid_link_cek(context, film_url, deneme=3):
 
     return ""
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# ─── MAIN ORKESTRASYON ────────────────────────────────────────────────────────
 async def main():
     filmler_dict = mevcut_filmleri_yukle()
     bos = [f for f in filmler_dict.values() if not f.get('rapid_link')]
@@ -245,7 +258,6 @@ async def main():
     print(f"  → {dolu} geçerli link korundu, {len(bos)} link taranacak.\n")
 
     async with async_playwright() as p:
-        # Cloudflare'in headless algılayıcılarını kör eden gelişmiş Chromium argümanları
         browser = await p.chromium.launch(
             headless=True,
             args=[
