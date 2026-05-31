@@ -1,4 +1,5 @@
 name: Film Botu Otomasyonu
+
 on:
   schedule:
     - cron: '0 0 * * *'
@@ -7,8 +8,9 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Depoyu Klonla
+      - name: Depoyu Klonla (Checkout)
         uses: actions/checkout@v4
 
       - name: Python Kurulumu
@@ -19,16 +21,20 @@ jobs:
       - name: Bağımlılıkları Yükle
         run: |
           python -m pip install --upgrade pip
-          # curl_cffi: Cloudflare TLS parmak izi taklidini yapan kütüphane
-          pip install curl_cffi beautifulsoup4
+          pip install playwright beautifulsoup4
 
-      - name: Botu Çalıştır
-        run: python fulhdfilm.py
+      - name: Playwright Tarayıcılarını Kur
+        run: |
+          playwright install-deps chromium
+          playwright install chromium
 
-      - name: Değişiklikleri Kaydet ve Gönder
+      - name: Botu Çalıştır (fulhdfilm.py)
+        run: |
+          python fulhdfilm.py
+
+      - name: Değişiklikleri Kaydet ve Depoya Gönder (Commit & Push)
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add data/tum_filmler.json
-          git diff --quiet && git diff --staged --quiet || \
-            (git commit -m "🤖 Gecelik güncelleme: film linkleri tarandı" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "🤖 Güncelleme: Gerçek film linkleri veritabanına yazıldı [Gecelik Tarama]" && git push)
