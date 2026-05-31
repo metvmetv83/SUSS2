@@ -4,14 +4,20 @@ import os
 import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
 
 if not os.path.exists('data'):
     os.makedirs('data')
 
 BASE = "https://www.fullhdfilmizlesene.life"
 SONUC_DOSYA = "data/tum_filmler.json"
-PARALEL = 1  # Engellenmemek için tekli istek
+PARALEL = 1
+
+STREAM_DOMAINS = [
+    "rapidvid", "vidmoly", "imgz.me", "doodstream",
+    "streamtape", "filemoon", "mixdrop", "upstream",
+    "vidsrc", "ok.ru", "myvi.ru", "sibnet.ru",
+    "dailymotion.com", "vimeo.com", "odysee.com",
+]
 
 VALID_STREAM_PATTERNS = [
     r'https?://(?:www\.)?rapidvid\.(?:net|to|com)/(?:vod|embed|v|e)/[^\s"\'<>]+',
@@ -25,18 +31,29 @@ VALID_STREAM_PATTERNS = [
     r'https?://[^\s"\'<>]+\.(?:mp4|m3u8)(?:\?[^\s"\'<>]+)?',
 ]
 
-STREAM_DOMAINS = [
-    "rapidvid", "vidmoly", "imgz", "doodstream",
-    "streamtape", "filemoon", "mixdrop", "upstream",
-    "vidsrc", "embedsito", "ok.ru", "myvi.ru"
-]
+# Cloudflare'i geçmek için gerçekçi tarayıcı başlıkları
+BROWSER_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 def url_gecerli_mi(url):
     if not url or len(url) < 15:
         return False
     for skip in [BASE, "youtube.com", "youtu.be", "google.com",
                  "facebook.com", "twitter.com", "instagram.com",
-                 "adnxs.com", "doubleclick.net", "googlesyndication.com"]:
+                 "adnxs.com", "doubleclick.net", "googlesyndication.com",
+                 "cloudflare.com", "recaptcha", "captcha"]:
         if skip in url:
             return False
     return True
@@ -74,19 +91,95 @@ def kesin_kaydet(filmler_dict):
     except Exception as e:
         print(f"⚠️ Dosya yazma hatası: {str(e)}")
 
+async def yeni_sayfa_ac(context):
+    """Stealth JS enjeksiyonuyla yeni sayfa aç."""
+    page = await context.new_page()
+    # Cloudflare bot tespitini geçmek için kritik JS'leri override et
+    await page.add_init_script("""
+        // navigator.webdriver'ı gizle
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        
+        // Chrome runtime'ı simüle et
+        window.chrome = {
+            runtime: {
+                onConnect: { addListener: () => {} },
+                onMessage: { addListener: () => {} },
+            },
+            loadTimes: () => ({}),
+            csi: () => ({}),
+        };
+        
+        // Permissions API'yi gerçekçi göster
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) =>
+            parameters.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : originalQuery(parameters);
+        
+        // Plugin listesini doldur (headless'ta boş olur)
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [
+                { name: 'Chrome PDF Plugin' },
+                { name: 'Chrome PDF Viewer' },
+                { name: 'Native Client' },
+            ],
+        });
+        
+        // Dil listesi
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['tr-TR', 'tr', 'en-US', 'en'],
+        });
+        
+        // Platform
+        Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+        
+        // Hardware concurrency (gerçekçi değer)
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    """)
+    return page
+
+async def cloudflare_bekle(page, timeout=15000):
+    """Cloudflare challenge sayfasını geç."""
+    try:
+        # CF challenge varsa bekle geçsin
+        await page.wait_for_function(
+            "() => !document.title.includes('Just a moment') && !document.title.includes('Checking')",
+            timeout=timeout
+        )
+    except Exception:
+        pass
+    await page.wait_for_timeout(1500)
+
 async def sayfa_filmlerini_cek_pw(context, page_num):
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
-    page = await context.new_page()
-    await stealth_async(page)
+    page = await yeni_sayfa_ac(context)
     try:
-        response = await page.goto(url, timeout=40000, wait_until='networkidle')
-        if not response or response.status != 200:
+        response = await page.goto(url, timeout=45000, wait_until='domcontentloaded')
+        
+        # Cloudflare challenge bekle
+        await cloudflare_bekle(page)
+        
+        # Gerçek içerik yüklenene kadar bekle
+        try:
+            await page.wait_for_selector('li.film', timeout=10000)
+        except Exception:
+            pass
+
+        if not response or response.status not in [200, 304]:
+            print(f"    HTTP {response.status if response else 'N/A'}: {url}")
             return None
 
         content = await page.content()
+        
+        # CF challenge sayfası mı?
+        if "Just a moment" in content or "cf-browser-verification" in content:
+            print(f"    ⚠️ Cloudflare engeli aşılamadı: {url}")
+            return None
+
         soup = BeautifulSoup(content, 'html.parser')
         films = soup.find_all('li', class_='film')
         if not films:
+            print(f"    ℹ️ Film listesi bulunamadı: {url}")
             return None
 
         filmler = []
@@ -98,29 +191,29 @@ async def sayfa_filmlerini_cek_pw(context, page_num):
                 filmler.append({
                     "title": title.text.strip(),
                     "link": link_tag['href'].rstrip('/'),
-                    "imdb": film.find('span', class_='imdb').text if film.find('span', class_='imdb') else "0",
-                    "year": film.find('span', class_='film-yil').text if film.find('span', class_='film-yil') else "",
-                    "image": (img.get('data-src') or img.get('src')) if img else "",
+                    "imdb": film.find('span', class_='imdb').text.strip() if film.find('span', class_='imdb') else "0",
+                    "year": film.find('span', class_='film-yil').text.strip() if film.find('span', class_='film-yil') else "",
+                    "image": (img.get('data-src') or img.get('src', '')) if img else "",
                     "rapid_link": ""
                 })
         return filmler
     except Exception as e:
-        print(f"  ⚠️ Sayfa çekme hatası ({url}): {e}")
+        print(f"    ⚠️ Sayfa hatası ({url}): {e}")
         return None
     finally:
         await page.close()
 
-async def html_icerisinde_stream_ara(html_content):
-    """HTML source içinde gömülü stream URL'lerini regex ile tara."""
+async def html_stream_ara(html_content):
+    """HTML kaynak kodundan stream URL'si çıkar."""
     for pattern in VALID_STREAM_PATTERNS:
         matches = re.findall(pattern, html_content, re.IGNORECASE)
         for m in matches:
             if url_gecerli_mi(m):
-                return m
-    # iframe src tarama
+                return m.strip()
+
     soup = BeautifulSoup(html_content, 'html.parser')
     for tag in soup.find_all(['iframe', 'source', 'video']):
-        for attr in ['src', 'data-src', 'data-lazy-src']:
+        for attr in ['src', 'data-src', 'data-lazy-src', 'data-url']:
             src = tag.get(attr, '')
             if src and any(d in src for d in STREAM_DOMAINS) and url_gecerli_mi(src):
                 return src.strip()
@@ -128,39 +221,40 @@ async def html_icerisinde_stream_ara(html_content):
 
 async def rapid_link_cek(context, film_url, deneme=3):
     for attempt in range(deneme):
-        page = await context.new_page()
-        await stealth_async(page)
+        page = await yeni_sayfa_ac(context)
         caught_urls = []
 
         def on_request(req):
-            url = req.url
-            if stream_url_mi(url):
-                caught_urls.append(url)
+            if stream_url_mi(req.url):
+                caught_urls.append(req.url)
 
         def on_response(res):
-            url = res.url
-            if stream_url_mi(url):
-                if url not in caught_urls:
-                    caught_urls.append(url)
+            if stream_url_mi(res.url) and res.url not in caught_urls:
+                caught_urls.append(res.url)
 
         page.on("request", on_request)
         page.on("response", on_response)
 
         try:
-            # --- ANA SAYFA YÜKLEMESİ ---
-            await page.goto(film_url, timeout=40000, wait_until='domcontentloaded')
-            await page.wait_for_timeout(2500)
+            await page.goto(film_url, timeout=45000, wait_until='domcontentloaded')
+            await cloudflare_bekle(page)
+            await page.wait_for_timeout(2000)
 
             if caught_urls:
                 return caught_urls[0].strip()
 
-            # --- HTML TARAMA (1. tur) ---
+            # HTML tara
             content = await page.content()
-            found = await html_icerisinde_stream_ara(content)
+            if "Just a moment" in content or "cf-browser-verification" in content:
+                print(f"    ⚠️ CF engeli (deneme {attempt+1})")
+                await asyncio.sleep(5)
+                continue
+
+            found = await html_stream_ara(content)
             if found:
                 return found
 
-            # --- NETWORKIDLe BEKLEME ---
+            # networkidle bekle
             try:
                 await page.wait_for_load_state('networkidle', timeout=8000)
             except Exception:
@@ -169,13 +263,10 @@ async def rapid_link_cek(context, film_url, deneme=3):
             if caught_urls:
                 return caught_urls[0].strip()
 
-            # --- PLAYER BOX TIKLAMA ---
-            player_selectors = [
-                '#plx', '.player-box', '#player', '.video-player',
-                '.video-container', '.embed-responsive', '.film-player',
-                '[class*="player"]', '[id*="player"]', 'video',
-            ]
-            for sel in player_selectors:
+            # Player tıklama
+            for sel in ['#plx', '.player-box', '#player', '.video-player',
+                        '.film-player', '[class*="player"]', 'video',
+                        '.embed-responsive', '.izle-player']:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
@@ -187,94 +278,69 @@ async def rapid_link_cek(context, film_url, deneme=3):
                 except Exception:
                     continue
 
-            # --- ALTERNATİF KAYNAK TABLARI ---
-            tab_selectors = [
-                '#dil-secenekleri .kalip',
-                '.player-tabs a', '.player-tabs button',
-                '.idSec a', '.idSec button',
-                'li[data-source]', 'li[data-id]',
-                '.video-alternatives button',
-                '.source-list li', '.source-list a',
-                '.alt-sources a', '.alt-sources button',
-                '[data-video]', '[data-link]',
-            ]
-            for sel in tab_selectors:
+            # Kaynak tabları
+            for sel in ['.player-tabs a', '.player-tabs button',
+                        '.idSec a', 'li[data-source]', 'li[data-id]',
+                        '.source-list li', '[data-video]', '[data-link]',
+                        '.alt-sources a', '#kaynaklar a']:
                 try:
-                    buttons = await page.query_selector_all(sel)
-                    for btn in buttons:
-                        try:
-                            if await btn.is_visible():
-                                await btn.click(timeout=2000, force=True)
-                                await page.wait_for_timeout(1800)
-                                if caught_urls:
-                                    return caught_urls[0].strip()
-                                # Her tıklamadan sonra HTML tara
-                                content = await page.content()
-                                found = await html_icerisinde_stream_ara(content)
-                                if found:
-                                    return found
-                        except Exception:
-                            continue
+                    for btn in await page.query_selector_all(sel):
+                        if await btn.is_visible():
+                            await btn.click(timeout=2000, force=True)
+                            await page.wait_for_timeout(1800)
+                            if caught_urls:
+                                return caught_urls[0].strip()
+                            content = await page.content()
+                            found = await html_stream_ara(content)
+                            if found:
+                                return found
                 except Exception:
                     continue
 
-            # --- IFRAME FRAME'LERİNE GİR ---
-            try:
-                frames = page.frames
-                for frame in frames:
-                    if frame == page.main_frame:
-                        continue
-                    try:
-                        frame_url = frame.url
-                        if any(d in frame_url for d in STREAM_DOMAINS):
-                            return frame_url.strip()
-                        frame_content = await frame.content()
-                        found = await html_icerisinde_stream_ara(frame_content)
-                        if found:
-                            return found
-                        # Frame içinde de request dinle
-                        for cu in caught_urls:
-                            return cu.strip()
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+            # Frame'leri tara
+            for frame in page.frames:
+                if frame == page.main_frame:
+                    continue
+                try:
+                    furl = frame.url
+                    if any(d in furl for d in STREAM_DOMAINS) and url_gecerli_mi(furl):
+                        return furl.strip()
+                    fc = await frame.content()
+                    found = await html_stream_ara(fc)
+                    if found:
+                        return found
+                except Exception:
+                    continue
 
-            # --- SON HTML TARAMA ---
-            content = await page.content()
-            found = await html_icerisinde_stream_ara(content)
-            if found:
-                return found
-
-            # --- JS DEĞİŞKENLERİNİ TARA ---
+            # JS değişkenleri tara
             try:
-                js_vars = await page.evaluate("""() => {
-                    const texts = [];
-                    // window nesnesindeki string değişkenler
-                    for (const key of Object.keys(window)) {
+                js_text = await page.evaluate("""() => {
+                    const out = [];
+                    for (const k of Object.keys(window)) {
                         try {
-                            const val = window[key];
-                            if (typeof val === 'string' && val.startsWith('http')) {
-                                texts.push(val);
-                            }
+                            const v = window[k];
+                            if (typeof v === 'string' && v.startsWith('http')) out.push(v);
                         } catch(e) {}
                     }
-                    // Script tagları
-                    document.querySelectorAll('script:not([src])').forEach(s => {
-                        texts.push(s.innerText || '');
-                    });
-                    return texts.join('\\n');
+                    document.querySelectorAll('script:not([src])').forEach(s => out.push(s.innerText));
+                    return out.join('\\n');
                 }""")
-                found = await html_icerisinde_stream_ara(js_vars)
+                found = await html_stream_ara(js_text)
                 if found:
                     return found
             except Exception:
                 pass
 
+            # Son HTML tarama
+            content = await page.content()
+            found = await html_stream_ara(content)
+            if found:
+                return found
+
         except Exception as e:
-            print(f"    ⚠️ Deneme {attempt+1} hatası ({film_url}): {e}")
+            print(f"    ⚠️ Hata deneme {attempt+1} ({film_url}): {e}")
             if attempt < deneme - 1:
-                await asyncio.sleep(4)
+                await asyncio.sleep(5)
         finally:
             try:
                 await page.close()
@@ -299,8 +365,10 @@ async def main():
                 '--mute-audio',
                 '--disable-blink-features=AutomationControlled',
                 '--window-size=1920,1080',
-                '--disable-web-security',         # Cross-origin iframe erişimi
+                '--disable-web-security',
                 '--allow-running-insecure-content',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--lang=tr-TR',
             ]
         )
 
@@ -310,37 +378,36 @@ async def main():
             locale='tr-TR',
             timezone_id='Europe/Istanbul',
             java_script_enabled=True,
-            bypass_csp=True,          # Content Security Policy'yi atla
+            bypass_csp=True,
             ignore_https_errors=True,
+            extra_http_headers=BROWSER_HEADERS,
         )
 
-        # --- AŞAMA 1: YENİ FİLM TARAMA ---
+        # === AŞAMA 1 ===
         print("=== AŞAMA 1: Yeni filmler taranıyor ===")
         bos_sayfa = 0
-        for page_num in range(1, 11):  # 10 sayfaya çıkarıldı
+        for page_num in range(1, 11):
             filmler = await sayfa_filmlerini_cek_pw(context, page_num)
             if filmler is None:
                 bos_sayfa += 1
-                print(f"Sayfa {page_num}: Erişilemedi veya boş.")
                 if bos_sayfa >= 2:
                     break
                 continue
             bos_sayfa = 0
-            yeni_eklenen = 0
+            yeni = sum(1 for f in filmler if f['link'] not in filmler_dict)
             for f in filmler:
                 if f['link'] not in filmler_dict:
                     filmler_dict[f['link']] = f
-                    yeni_eklenen += 1
-            if yeni_eklenen > 0:
-                print(f"Sayfa {page_num}: {yeni_eklenen} yeni film eklendi.")
+            if yeni > 0:
+                print(f"Sayfa {page_num}: {yeni} yeni film eklendi.")
                 kesin_kaydet(filmler_dict)
             else:
                 print(f"Sayfa {page_num}: Yeni film yok.")
 
-        # --- AŞAMA 2: STREAMİNG LİNK ÇEKME ---
+        # === AŞAMA 2 ===
         bos_filmler = [f for f in filmler_dict.values() if not f.get('rapid_link')]
         if bos_filmler:
-            print(f"\n=== AŞAMA 2: {len(bos_filmler)} film için linkler çıkarılıyor ===\n")
+            print(f"\n=== AŞAMA 2: {len(bos_filmler)} film için link çıkarılıyor ===\n")
             semaphore = asyncio.Semaphore(PARALEL)
 
             async def isle(film):
@@ -350,28 +417,21 @@ async def main():
                         film['rapid_link'] = link
                         filmler_dict[film['link']] = film
                         kesin_kaydet(filmler_dict)
-                        print(f"  ✓ BAŞARILI: {film['title']}")
+                        print(f"  ✓ {film['title']}")
                         print(f"    → {link}")
                     else:
-                        print(f"  ✗ BULUNAMADI: {film['title']}")
-                    return film
+                        print(f"  ✗ {film['title']}")
 
-            # Gruplar halinde işle, her gruptan sonra kısa bekleme
             for i in range(0, len(bos_filmler), 5):
-                grup = bos_filmler[i:i+5]
-                await asyncio.gather(*[isle(f) for f in grup])
+                await asyncio.gather(*[isle(f) for f in bos_filmler[i:i+5]])
                 await asyncio.sleep(3)
 
         await browser.close()
 
-    dolu_sayisi = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
-    toplam = len(filmler_dict)
-    oran = (dolu_sayisi / toplam * 100) if toplam > 0 else 0
+    dolu_s = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
+    top = len(filmler_dict)
     print(f"\n{'='*50}")
-    print(f"✓ İşlem tamamlandı.")
-    print(f"  Toplam Film   : {toplam}")
-    print(f"  Geçerli Link  : {dolu_sayisi} ({oran:.1f}%)")
-    print(f"  Eksik Link    : {toplam - dolu_sayisi}")
+    print(f"✓ Tamamlandı. Toplam: {top} | Link var: {dolu_s} ({dolu_s/top*100:.1f}% ) | Eksik: {top-dolu_s}")
     print(f"{'='*50}")
 
 if __name__ == "__main__":
