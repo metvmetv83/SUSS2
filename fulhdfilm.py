@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
@@ -41,7 +42,6 @@ def kaydet(filmler_dict):
         json.dump(list(filmler_dict.values()), f, ensure_ascii=False, indent=2)
 
 async def sayfa_filmlerini_cek_pw(context, page_num):
-    """ Requests yerine Playwright kullanarak sayfayı çeker (Hata önleyici) """
     url = f"{BASE}/yeni-filmler/" if page_num == 1 else f"{BASE}/yeni-filmler/{page_num}"
     page = await context.new_page()
     try:
@@ -83,11 +83,13 @@ async def rapid_link_cek(context, film_url, deneme=3):
     for attempt in range(deneme):
         page = await context.new_page()
         try:
+            # Reklam ve yük bindiren her şeyi engelle
             await page.route("**/*", lambda route: route.abort()
-                if route.request.resource_type in ["image", "font", "stylesheet"]
+                if route.request.resource_type in ["image", "font", "stylesheet", "media"]
                 else route.continue_()
             )
 
+            # Algoritmik Ağ İzleme Aktif
             caught_url = []
             def on_request(req):
                 url = req.url
@@ -99,33 +101,51 @@ async def rapid_link_cek(context, film_url, deneme=3):
 
             page.on("request", on_request)
             await page.goto(film_url, timeout=25000, wait_until='domcontentloaded')
-            await page.wait_for_timeout(3500)
-
+            
+            # Ağ dinlemesinden hızlıca düşerse doğrudan dön
             if caught_url:
                 await page.close()
                 return caught_url[0].strip()
 
-            iframe_selectors = [
-                '#plx iframe', '.player-box iframe', '.player-inside iframe',
-                'iframe[src*="rapidvid"]', 'iframe[src*="vidmoly"]', 'iframe[data-src]'
-            ]
+            # Kaynağı alıp derin analiz yapıyoruz
+            content = await page.content()
+            soup = BeautifulSoup(content, 'html.parser')
 
-            for selector in iframe_selectors:
-                try:
-                    src = await page.eval_on_selector(
-                        selector,
-                        'el => el.getAttribute("data-src") || el.getAttribute("src") || ""',
-                        timeout=2000
-                    )
-                    if src and src.startswith('http') and BASE not in src and "youtube" not in src:
+            # 1. Aşama: Sayfa içi elementlerin data-id / data-video özniteliklerini oku
+            elements_with_id = soup.find_all(attrs={"data-id": True}) or soup.find_all(attrs={"data-video-id": True})
+            for el in elements_with_id:
+                v_id = el.get('data-id') or el.get('data-video-id')
+                if v_id and v_id.isdigit() and len(v_id) >= 4:
+                    await page.close()
+                    return f"https://rapidvid.net/embed/{v_id}"
+
+            # 2. Aşama: iframe elementlerini data-src veya src bazlı ayıkla
+            for iframe in soup.find_all('iframe'):
+                src = iframe.get('data-src') or iframe.get('src') or ''
+                if "rapidvid.net" in src or "vidmoly" in src:
+                    if BASE not in src and "youtube" not in src:
                         await page.close()
                         return src.strip()
-                except:
-                    continue
+
+            # 3. Aşama: JavaScript değişkenlerinden ID/URL yakalama (Regex Fallback)
+            # Örn: var film_id = "12345"; veya id: "54321"
+            js_id_patterns = [
+                r'["\']?video_id["\']?\s*[=:]\s*["\'](\d+)["\']',
+                r'["\']?id["\']?\s*:\s*["\'](\d+)["\']',
+                r'data-id=["\'](\d+)["\']',
+                r'/embed/(\d+)'
+            ]
+            for pattern in js_id_patterns:
+                match = re.search(pattern, content)
+                if match:
+                    v_id = match.group(1)
+                    if len(v_id) >= 4:
+                        await page.close()
+                        return f"https://rapidvid.net/embed/{v_id}"
 
         except Exception:
             if attempt < deneme - 1:
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
         finally:
             await page.close()
 
@@ -154,7 +174,6 @@ async def main():
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         """)
 
-        # === AŞAMA 1: Yeni sayfaları tara (Playwright entegreli) ===
         print("=== AŞAMA 1: Yeni filmler taranıyor ===")
         bos_sayfa = 0
         for page_num in range(1, 20):
@@ -174,7 +193,6 @@ async def main():
             else:
                 print(f"Sayfa {page_num}: yeni film yok")
 
-        # === AŞAMA 2: Boş rapid_link olanları doldur ===
         bos_filmler = [f for f in filmler_dict.values() if not f.get('rapid_link')]
         if bos_filmler:
             print(f"\n=== AŞAMA 2: {len(bos_filmler)} film için gerçek rapid_link kaynakları çekiliyor ===\n")
@@ -199,7 +217,7 @@ async def main():
                 kaydet(filmler_dict)
                 dolu = sum(1 for f in filmler_dict.values() if f.get('rapid_link'))
                 print(f"\n💾 Kaydedildi — {islenen}/{len(bos_filmler)} işlendi, toplam doğrulanmış dolu: {dolu}\n")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
 
         await browser.close()
 
