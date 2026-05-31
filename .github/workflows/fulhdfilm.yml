@@ -1,44 +1,49 @@
-name: Film Botu Calistir
+name: Film Botu Otomasyonu
+
 on:
   schedule:
-    - cron: '0 * * * *'  # Her saat başı çalışır
-  workflow_dispatch:     # Manuel tetikleme butonu
-
-permissions:
-  contents: write
+    # Her gece Türkiye saati ile 03:00'te otomatik çalışır (UTC 00:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # İstediğiniz zaman GitHub web panelinden elle başlatmak için
 
 jobs:
-  build:
+  run-bot:
     runs-on: ubuntu-latest
-    steps:
-      - name: Depoyu kopyala
-        uses: actions/checkout@v3
 
-      - name: Python Kur
-        uses: actions/setup-python@v4
+    steps:
+      - name: Depoyu Klonla (Checkout)
+        uses: actions/checkout@v4
+
+      - name: Python Kurulumu
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip' # İlerleyen süreçte daha hızlı çalışması için pip önbelleğe alınır
 
-      - name: Kütüphaneleri Yukle
+      - name: Bağımlılıkları Yükle
         run: |
           python -m pip install --upgrade pip
-          pip install beautifulsoup4 playwright
+          pip install playwright beautifulsoup4
+          # Eğer kodda requests kütüphanesini tamamen temizlemediyseniz sorun çıkmasın diye buraya da ekledik:
+          pip install requests
 
-      - name: Playwright Chromium Kur
-        run: playwright install chromium --with-deps
-
-      - name: Botu Calistir
-        run: python fulhdfilm.py
-
-      - name: Degisiklikleri Kaydet
+      - name: Playwright Tarayıcılarını ve Sistem Paketlerini Kur
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p data
-          git add data/
-          if ! git diff --cached --quiet; then
-            git commit -m "Film verileri güncellendi [skip ci]"
-            git push
-          else
-            echo "Herhangi bir değişiklik yok."
-          fi
+          # Linux sunucusunda Chromium'un çalışması için gereken tüm sistem kütüphanelerini kurar
+          playwright install-deps chromium
+          playwright install chromium
+
+      - name: Botu Çalıştır (fulhdfilm.py)
+        run: |
+          python fulhdfilm.py
+
+      - name: Değişiklikleri Kaydet ve Depoya Gönder (Commit & Push)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Sadece data/tum_filmler.json dosyası güncellendiyse işleme al
+          git add data/tum_filmler.json
+          
+          # Değişiklik varsa commit et ve pushla, yoksa hata vermeden geç
+          git diff --quiet && git diff --staged --quiet || (git commit -m "🤖 Güncelleme: Gerçek film linkleri veritabanına yazıldı [Gecelik Tarama]" && git push)
